@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     max_tokens_cap: int = 0
     model_alias_fallback: bool = True
     expose_upstream_models: bool = False
+    normalize_tool_arguments: bool = True
 
     @property
     def api_key_set(self) -> frozenset[str]:

@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 
 from .config import Settings
 from .errors import ModelNotFoundError, UpstreamError
+from .toolcalls import normalize_tool_arguments
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +86,11 @@ def prepare_payload(payload: dict[str, Any], target: Target, settings: Settings)
     """Normalise the request body before it reaches vLLM."""
     prepared = dict(payload)
     prepared["model"] = target.model_id
+
+    if settings.normalize_tool_arguments:
+        prepared, notes = normalize_tool_arguments(prepared)
+        for note in notes:
+            log.info("normalised inbound tool-call arguments - %s", note)
 
     cap = settings.max_tokens_cap
     if cap > 0:

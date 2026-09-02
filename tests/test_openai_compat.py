@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 import httpx
@@ -107,6 +108,62 @@ async def test_tool_calling_fields_reach_the_model_server_untouched(
     assert upstream.last_body["tools"] == tools
     assert upstream.last_body["tool_choice"] == "auto"
     assert upstream.last_body["parallel_tool_calls"] is True
+
+
+async def test_replayed_tool_calls_reach_vllm_as_valid_json(
+    client: httpx.AsyncClient, upstream: FakeUpstream
+) -> None:
+    """vLLM json.loads() the arguments of inbound tool calls and 400s otherwise."""
+    upstream.json_response("POST", CHAT_URL, CHAT_REPLY)
+
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": PRIMARY_MODEL,
+            "messages": [
+                {"role": "user", "content": "read it"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            # A Python dict repr, as some editor clients replay.
+                            "function": {"name": "read_file", "arguments": "{'path': 'a.py'}"},
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    sent = upstream.last_body["messages"][1]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(sent) == {"path": "a.py"}
+
+
+async def test_normalisation_can_be_turned_off(
+    gateway_factory: GatewayFactory, upstream: FakeUpstream
+) -> None:
+    client = await gateway_factory(make_settings(normalize_tool_arguments=False))
+    upstream.json_response("POST", CHAT_URL, CHAT_REPLY)
+
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": PRIMARY_MODEL,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"function": {"name": "read_file", "arguments": "{'path': 'a.py'}"}}
+                    ],
+                }
+            ],
+        },
+    )
+
+    sent = upstream.last_body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert sent == "{'path': 'a.py'}"
 
 
 async def test_upstream_4xx_body_and_status_are_preserved(
