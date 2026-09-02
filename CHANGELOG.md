@@ -1,6 +1,24 @@
 # CHANGELOG
 
 
+## v0.2.0 (2026-09-02)
+
+### Bug Fixes
+
+- Reformat file typing
+  ([`670f187`](https://github.com/Ryan121/llm-assistant-api/commit/670f187930087be8d564521de6d8dd61adf928c2))
+
+### Chores
+
+- Update docs
+  ([`0494760`](https://github.com/Ryan121/llm-assistant-api/commit/0494760f44ecfc66cee92f8e69712787b7bcc399))
+
+### Features
+
+- Add config checker to provide rich feedback on auth
+  ([`9883981`](https://github.com/Ryan121/llm-assistant-api/commit/9883981d67972d86f6aaecfe964e1067dc90d00f))
+
+
 ## v0.1.5 (2026-09-02)
 
 ### Bug Fixes
