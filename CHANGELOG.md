@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.1.3 (2026-09-02)
+
+### Bug Fixes
+
+- Resolve enginecore errors in model due to inactive nvlink between gpus
+  ([`6f38dc6`](https://github.com/Ryan121/llm-assistant-api/commit/6f38dc6605507fdf497e5fb3fe6a595ea73d39ee))
+
+
 ## v0.1.2 (2026-09-02)
 
 ### Bug Fixes
