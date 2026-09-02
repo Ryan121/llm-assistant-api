@@ -1,0 +1,10 @@
+---
+# The playbooks deliberately stick to ansible.builtin so they run on a bare
+# `pip install ansible-core`. These collections are optional conveniences.
+collections:
+  # Required only for deploying to a REMOTE GPU host (ansible.posix.synchronize
+  # in deploy.yml). Localhost deployments need none of these.
+  - name: ansible.posix
+    version: ">=1.5.4"
+  - name: community.docker
+    version: ">=3.10.0"

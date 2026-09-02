@@ -1,0 +1,143 @@
+name: llm-assistant
+
+# -----------------------------------------------------------------------------
+# The network and the model-cache volume are created by Terraform and declared
+# `external` here. That is deliberate: it means `docker compose down -v` can
+# never delete the ~60 GB of Hugging Face weights.
+# -----------------------------------------------------------------------------
+networks:
+  default:
+    name: ${DOCKER_NETWORK:-llm-assistant-net}
+    external: true
+
+volumes:
+  model-cache:
+    name: ${MODEL_CACHE_VOLUME:-llm-assistant-model-cache}
+    external: true
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+x-vllm-base: &vllm-base
+  image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.11.0}
+  restart: unless-stopped
+  # vLLM's tensor-parallel workers talk over shared memory; the default 64 MB
+  # is far too small and shows up as a silent NCCL hang.
+  ipc: host
+  ulimits:
+    memlock: -1
+    stack: 67108864
+  volumes:
+    - model-cache:/models
+  stop_grace_period: 60s
+
+services:
+  # ---------------------------------------------------------------------------
+  # Primary model server. Downloads MODEL_ID from Hugging Face on first boot.
+  # ---------------------------------------------------------------------------
+  vllm:
+    <<: [*vllm-base, *gpu]
+    container_name: llm-assistant-vllm
+    environment:
+      HF_HOME: /models
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0,1}
+      NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
+      VLLM_WORKER_MULTIPROC_METHOD: spawn
+      VLLM_API_KEY: ${UPSTREAM_API_KEY:-}
+    command: >
+      --model ${MODEL_ID:?MODEL_ID must be set - run `make env` first}
+      --served-model-name ${MODEL_ID}
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-2}
+      --max-model-len ${MAX_MODEL_LEN:-131072}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-32}
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.90}
+      --dtype ${VLLM_DTYPE:-bfloat16}
+      ${VLLM_TOOL_ARGS:-}
+      ${VLLM_EXTRA_ARGS:-}
+    healthcheck:
+      test:
+        ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # A cold start has to download tens of GB before it can answer.
+      start_period: ${VLLM_START_PERIOD:-3600s}
+
+  # ---------------------------------------------------------------------------
+  # Optional small FIM model, only for inline tab-completion.
+  #   docker compose --profile autocomplete up -d
+  # ---------------------------------------------------------------------------
+  vllm-autocomplete:
+    <<: [*vllm-base, *gpu]
+    container_name: llm-assistant-vllm-fim
+    profiles: [autocomplete]
+    environment:
+      HF_HOME: /models
+      HF_TOKEN: ${HF_TOKEN:-}
+      HUGGING_FACE_HUB_TOKEN: ${HF_TOKEN:-}
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0,1}
+      VLLM_API_KEY: ${UPSTREAM_API_KEY:-}
+    command: >
+      --model ${AUTOCOMPLETE_MODEL_ID:-Qwen/Qwen2.5-Coder-1.5B}
+      --served-model-name ${AUTOCOMPLETE_MODEL_ID:-Qwen/Qwen2.5-Coder-1.5B}
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+      --max-model-len ${AUTOCOMPLETE_MAX_MODEL_LEN:-8192}
+      --gpu-memory-utilization ${AUTOCOMPLETE_GPU_MEMORY_UTILIZATION:-0.08}
+      --dtype ${VLLM_DTYPE:-bfloat16}
+    healthcheck:
+      test:
+        ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: ${VLLM_START_PERIOD:-3600s}
+
+  # ---------------------------------------------------------------------------
+  # The OpenAI-compatible gateway VS Code connects to. Semantically versioned
+  # and published to GHCR by CI; `make build` produces the :local tag.
+  # ---------------------------------------------------------------------------
+  api:
+    image: ${API_IMAGE:-ghcr.io/ryan121/llm-assistant-api}:${API_IMAGE_TAG:-local}
+    container_name: llm-assistant-api
+    build:
+      context: .
+      target: runtime
+      args:
+        APP_VERSION: ${API_IMAGE_TAG:-local}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8080}:8080"
+    environment:
+      MODEL_ID: ${MODEL_ID}
+      UPSTREAM_BASE_URL: http://vllm:8000/v1
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-}
+      AUTOCOMPLETE_ENABLED: ${AUTOCOMPLETE_ENABLED:-false}
+      AUTOCOMPLETE_BASE_URL: http://vllm-autocomplete:8000/v1
+      AUTOCOMPLETE_MODEL_ID: ${AUTOCOMPLETE_MODEL_ID:-Qwen/Qwen2.5-Coder-1.5B}
+      API_KEYS: ${API_KEYS:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAX_TOKENS_CAP: ${MAX_TOKENS_CAP:-0}
+      MODEL_ALIAS_FALLBACK: ${MODEL_ALIAS_FALLBACK:-true}
+      EXPOSE_UPSTREAM_MODELS: ${EXPOSE_UPSTREAM_MODELS:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      REQUEST_TIMEOUT_SECONDS: ${REQUEST_TIMEOUT_SECONDS:-900}
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+    depends_on:
+      # Deliberately service_started, not service_healthy: the gateway should
+      # be reachable while the model loads so /readyz can report progress.
+      vllm:
+        condition: service_started

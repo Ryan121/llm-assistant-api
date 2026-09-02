@@ -1,0 +1,8 @@
+---
+# Tiny CUDA image used only to prove `--gpus all` works. Overridable so an
+# air-gapped host can point at an internal mirror.
+nvidia_container_toolkit_smoke_image: nvidia/cuda:12.4.1-base-ubuntu22.04
+
+# Pulls ~200 MB the first time. Set false on an air-gapped or bandwidth-tight
+# host; the deployment will then fail later at `make up` instead of here.
+nvidia_container_toolkit_verify: true

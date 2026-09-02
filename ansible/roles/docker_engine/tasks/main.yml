@@ -1,0 +1,109 @@
+---
+- name: Check whether Docker is already installed
+  ansible.builtin.command: docker --version
+  register: docker_engine_check
+  changed_when: false
+  failed_when: false
+
+- name: Record the Docker version
+  ansible.builtin.set_fact:
+    docker_engine_version: "{{ docker_engine_check.stdout | default('absent') }}"
+
+- name: Install Docker Engine from the official repository
+  when: docker_engine_check.rc != 0
+  become: true
+  block:
+    - name: Fail on unsupported distributions
+      ansible.builtin.fail:
+        msg: >-
+          Automatic Docker installation is only wired up for Debian/Ubuntu
+          (found {{ ansible_distribution }}). Install Docker Engine and the
+          Compose v2 plugin yourself, then re-run with
+          -e manage_docker_engine=false.
+      when: ansible_os_family != 'Debian'
+
+    - name: Install repository prerequisites
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Create the keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Fetch the Docker GPG key
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+        force: false
+
+    - name: Add the Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/{{ ansible_distribution | lower }}
+          {{ ansible_distribution_release }} stable
+        filename: docker
+        state: present
+
+    - name: Install Docker Engine and the Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Re-read the installed version
+      ansible.builtin.command: docker --version
+      register: docker_engine_check_post
+      changed_when: false
+
+    - name: Update the recorded version
+      ansible.builtin.set_fact:
+        docker_engine_version: "{{ docker_engine_check_post.stdout }}"
+
+- name: Verify Compose v2 is available
+  ansible.builtin.command: docker compose version
+  register: docker_engine_compose_check
+  changed_when: false
+  failed_when: false
+
+- name: Require the Compose v2 plugin
+  ansible.builtin.assert:
+    that:
+      - docker_engine_compose_check.rc == 0
+    fail_msg: >-
+      `docker compose` is unavailable. Install the docker-compose-plugin
+      package; the legacy standalone docker-compose v1 is not supported
+      (this stack uses `profiles`, `depends_on.condition` and merge anchors).
+    success_msg: "{{ docker_engine_compose_check.stdout | default('') }}"
+
+- name: Add the deploying user to the docker group
+  become: true
+  ansible.builtin.user:
+    name: "{{ ansible_user_id }}"
+    groups: docker
+    append: true
+  when:
+    - ansible_user_id != 'root'
+    - docker_engine_check.rc != 0
+  notify: Warn about group re-login

@@ -1,0 +1,76 @@
+---
+- name: Locate nvidia-smi
+  ansible.builtin.command: which nvidia-smi
+  register: preflight_nvidia_smi
+  changed_when: false
+  failed_when: false
+
+- name: Fail early when the NVIDIA driver is missing
+  ansible.builtin.fail:
+    msg: >-
+      nvidia-smi was not found. Install the NVIDIA driver (>= 535 for the CUDA
+      12.x wheels vLLM ships) before running this playbook. Ansible will not
+      install a GPU driver for you: a bad driver swap can leave the box without
+      a display and needs a reboot to recover.
+  when: preflight_nvidia_smi.rc != 0
+
+- name: Query the GPUs
+  ansible.builtin.command: nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits
+  register: preflight_gpu_query
+  changed_when: false
+
+- name: Parse the GPU inventory
+  ansible.builtin.set_fact:
+    preflight_gpu_rows: "{{ preflight_gpu_query.stdout_lines | map('split', ', ') | list }}"
+
+- name: Extract GPU names and memory
+  ansible.builtin.set_fact:
+    preflight_gpu_names: "{{ preflight_gpu_rows | map(attribute=0) | list }}"
+    preflight_gpu_memory_mib: "{{ preflight_gpu_rows | map(attribute=1) | map('int') | list }}"
+    preflight_driver_version: "{{ preflight_gpu_rows[0][2] | trim }}"
+
+- name: Require enough GPUs for the configured tensor-parallel size
+  ansible.builtin.assert:
+    that:
+      - preflight_gpu_names | length >= required_gpu_count
+    fail_msg: >-
+      Found {{ preflight_gpu_names | length }} GPU(s) but {{ required_gpu_count }} are
+      required. Lower TENSOR_PARALLEL_SIZE in .env (and required_gpu_count
+      here) or add GPUs.
+    success_msg: "{{ preflight_gpu_names | length }} GPU(s): {{ preflight_gpu_names | join(', ') }}"
+
+- name: Require enough VRAM per GPU
+  ansible.builtin.assert:
+    that:
+      - preflight_gpu_memory_mib | min >= required_gpu_memory_mib
+    fail_msg: >-
+      Smallest GPU has {{ preflight_gpu_memory_mib | min }} MiB, below the
+      {{ required_gpu_memory_mib }} MiB this deployment assumes. A 30B BF16
+      checkpoint needs ~31 GB per card at TP=2 before any KV cache.
+    success_msg: "VRAM per GPU: {{ preflight_gpu_memory_mib | join(', ') }} MiB"
+
+- name: Warn about old drivers
+  ansible.builtin.debug:
+    msg: >-
+      Driver {{ preflight_driver_version }} is older than 535. vLLM's CUDA 12.x wheels
+      may refuse to initialise.
+  when: preflight_driver_version is version('535', '<')
+
+- name: Check free disk space on the Docker root
+  ansible.builtin.shell:
+    cmd: set -o pipefail && df -BG --output=avail /var/lib/docker 2>/dev/null | tail -1 | tr -dc '0-9'
+    executable: /bin/bash
+  register: preflight_free_disk_gb
+  changed_when: false
+  failed_when: false
+
+- name: Require room for the model cache
+  ansible.builtin.assert:
+    that:
+      - (preflight_free_disk_gb.stdout | default('0') | int) >= required_free_disk_gb
+    fail_msg: >-
+      Only {{ preflight_free_disk_gb.stdout | default('0') }} GB free where Docker
+      stores volumes, but {{ required_free_disk_gb }} GB is required for the
+      Hugging Face cache. Free space or move Docker's data-root.
+    success_msg: "{{ preflight_free_disk_gb.stdout | default('?') }} GB free for the model cache"
+  when: preflight_free_disk_gb.rc == 0 and (preflight_free_disk_gb.stdout | default('')) | length > 0

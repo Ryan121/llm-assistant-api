@@ -1,0 +1,39 @@
+# --- secrets / local config ---
+.env
+.env.local
+terraform/terraform.tfvars
+ansible/inventory/group_vars/all/terraform.yml
+vscode/continue-config.generated.yaml
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- terraform (the provider lock file IS committed on purpose) ---
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+tfplan
+
+# --- ansible ---
+*.retry
+.ansible/
+ansible/collections/
+
+# --- editors / os ---
+.DS_Store
+.idea/
+*.swp

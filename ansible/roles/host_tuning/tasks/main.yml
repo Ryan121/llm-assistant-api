@@ -1,0 +1,39 @@
+---
+# Two limits that bite specifically on multi-GPU vLLM hosts. Written with
+# ansible.builtin only, so no collections are required.
+
+- name: Raise vm.max_map_count for the paged KV-cache allocator
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-llm-assistant.conf
+    content: |
+      # Managed by llm-assistant-api (ansible)
+      # vLLM's paged attention allocator maps many small blocks; the distro
+      # default of 65530 is reached with a large KV cache.
+      vm.max_map_count = 1048576
+    mode: "0644"
+  when: ansible_system == 'Linux'
+  notify: Reload sysctl
+
+- name: Ensure the docker systemd drop-in directory exists
+  become: true
+  ansible.builtin.file:
+    path: /etc/systemd/system/docker.service.d
+    state: directory
+    mode: "0755"
+  when: ansible_service_mgr == 'systemd'
+
+- name: Raise the open-file and memlock limits for the docker service
+  become: true
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/docker.service.d/llm-assistant-limits.conf
+    content: |
+      # Managed by llm-assistant-api (ansible)
+      # vLLM holds a descriptor per sequence slot and per NCCL channel, and
+      # pins host memory for the tensor-parallel transfers.
+      [Service]
+      LimitNOFILE=1048576
+      LimitMEMLOCK=infinity
+    mode: "0644"
+  when: ansible_service_mgr == 'systemd'
+  notify: Reload systemd and restart docker

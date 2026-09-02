@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Reject commit subjects that CI's release job cannot turn into a version bump.
+# Install with: make hooks
+set -euo pipefail
+
+msg_file="$1"
+subject="$(head -1 "$msg_file")"
+
+# Let git's own generated messages through.
+case "$subject" in
+  "Merge "*|"Revert "*|"fixup!"*|"squash!"*|"amend!"*) exit 0 ;;
+esac
+
+pattern='^(feat|fix|perf|refactor|docs|style|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: .{1,}'
+
+if printf '%s' "$subject" | grep -Eq "$pattern"; then
+  if [ "${#subject}" -gt 72 ]; then
+    printf 'warning: subject is %s characters; 72 or fewer reads better in git log\n' "${#subject}" >&2
+  fi
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+Commit rejected: the subject is not a Conventional Commit.
+
+  <type>[(scope)][!]: <description>
+
+Types      feat fix perf refactor docs style test build ci chore revert
+Bumps      fix|perf|refactor -> patch    feat -> minor    ! or BREAKING CHANGE -> major
+
+Examples
+  feat(api): route autocomplete traffic to the FIM model
+  fix(proxy): return 504 instead of 502 on an upstream read timeout
+  docs(vscode): document the Cline setup
+  feat(api)!: require API_KEYS to be set
+
+Bypass once with --no-verify if you really must.
+EOF
+exit 1

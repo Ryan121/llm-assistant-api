@@ -1,0 +1,115 @@
+---
+# Container lifecycle. Works unchanged for localhost and for a remote GPU box:
+# on a remote host the repo is synchronised first, then Compose runs there.
+#
+#   ansible-playbook deploy.yml
+#   ansible-playbook deploy.yml -e compose_profiles="--profile autocomplete"
+#   ansible-playbook deploy.yml -t restart
+
+- name: Deploy the assistant stack
+  hosts: gpu_hosts
+  gather_facts: true
+  become: false
+
+  vars:
+    local_repo: "{{ playbook_dir | dirname }}"
+    remote_repo: "{{ project_dir }}"
+    compose_profiles: ""
+    readiness_timeout_seconds: 3600
+
+  tasks:
+    - name: Decide whether the repo needs shipping to the host
+      ansible.builtin.set_fact:
+        is_local_host: "{{ ansible_connection | default('smart') == 'local' }}"
+
+    - name: Use the checkout in place on a local deployment
+      ansible.builtin.set_fact:
+        deploy_dir: "{{ local_repo if is_local_host else remote_repo }}"
+
+    - name: Ship the repository to the remote GPU host
+      when: not is_local_host
+      block:
+        - name: Create the target directory
+          ansible.builtin.file:
+            path: "{{ remote_repo }}"
+            state: directory
+            mode: "0750"
+
+        # Needs the ansible.posix collection -- `make ansible-deps` installs it.
+        # Only the remote path needs it; localhost deployments have no dependency.
+        - name: Synchronise the deployment files
+          ansible.posix.synchronize:
+            src: "{{ local_repo }}/"
+            dest: "{{ remote_repo }}/"
+            delete: true
+            rsync_opts:
+              - "--exclude=.git"
+              - "--exclude=.venv"
+              - "--exclude=terraform/.terraform"
+              - "--exclude=__pycache__"
+
+    - name: Require a .env on the target host
+      ansible.builtin.stat:
+        path: "{{ deploy_dir }}/.env"
+      register: env_file
+
+    - name: Fail with a pointer to `make env`
+      ansible.builtin.fail:
+        msg: "{{ deploy_dir }}/.env is missing. Run `make env` and set MODEL_ID / API_KEYS first."
+      when: not env_file.stat.exists
+
+    - name: Read API_PORT from .env
+      ansible.builtin.shell:
+        cmd: set -o pipefail && grep -E '^API_PORT=' .env | tail -1 | cut -d= -f2
+        chdir: "{{ deploy_dir }}"
+        executable: /bin/bash
+      register: api_port_lookup
+      changed_when: false
+
+    - name: Default the API port
+      ansible.builtin.set_fact:
+        api_port: "{{ (api_port_lookup.stdout | trim) or '8080' }}"
+
+    - name: Build the gateway image
+      ansible.builtin.command:
+        cmd: docker compose build api
+        chdir: "{{ deploy_dir }}"
+      register: compose_build
+      changed_when: "'Building' in compose_build.stderr or 'DONE' in compose_build.stderr"
+      tags: [build]
+
+    - name: Start the stack
+      ansible.builtin.command:
+        cmd: "docker compose {{ compose_profiles }} up -d --remove-orphans"
+        chdir: "{{ deploy_dir }}"
+      register: compose_up
+      changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr"
+      tags: [up, restart]
+
+    - name: Wait for the gateway to accept connections
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ api_port }}/healthz"
+        status_code: 200
+      register: liveness
+      retries: 30
+      delay: 2
+      until: liveness is succeeded
+      tags: [up, restart, verify]
+
+    - name: Wait for the model to finish loading
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ api_port }}/readyz"
+        status_code: 200
+      register: readiness
+      retries: "{{ (readiness_timeout_seconds | int / 15) | round | int }}"
+      delay: 15
+      until: readiness is succeeded
+      tags: [up, restart, verify]
+
+    - name: Report the endpoint
+      ansible.builtin.debug:
+        msg:
+          - "Gateway ready on http://{{ ansible_host | default('127.0.0.1') }}:{{ api_port }}/v1"
+          - "Models: {{ readiness.json.upstreams.keys() | list | join(', ') }}"
+          - "Configure VS Code with: make vscode-config"
+      tags: [always]

@@ -1,0 +1,22 @@
+---
+# Defaults for the host-preparation playbooks. Terraform overwrites the
+# infra-derived subset of these in terraform.yml (generated, git-ignored).
+
+# Minimum hardware the deployment expects. 2x RTX A6000 = 2 GPUs, 48 GB each.
+required_gpu_count: 2
+required_gpu_memory_mib: 40000
+
+# Free space needed for the Hugging Face cache. A 30B BF16 checkpoint is ~61 GB;
+# leave room for a second model and for HF's temporary download files.
+required_free_disk_gb: 200
+
+# Set false on a host where Docker/toolkit are managed elsewhere (e.g. by an
+# image build) and Ansible should only verify, never install.
+manage_docker_engine: true
+manage_nvidia_toolkit: true
+manage_host_tuning: true
+
+# Fallbacks used when terraform.yml has not been generated yet.
+docker_network: llm-assistant-net
+model_cache_volume: llm-assistant-model-cache
+project_dir: "{{ playbook_dir | dirname }}"

@@ -1,0 +1,38 @@
+---
+# Host preparation. Idempotent, safe to re-run, and does not touch containers.
+#   ansible-playbook site.yml            # localhost by default
+#   ansible-playbook site.yml -K         # if sudo needs a password
+#
+# Container lifecycle lives in deploy.yml / docker-compose.yml.
+
+- name: Prepare the GPU host for llm-assistant-api
+  hosts: gpu_hosts
+  gather_facts: true
+  become: false
+
+  roles:
+    - role: preflight
+      tags: [preflight, always]
+
+    - role: docker_engine
+      tags: [docker]
+      when: manage_docker_engine | bool
+
+    - role: nvidia_container_toolkit
+      tags: [nvidia]
+      when: manage_nvidia_toolkit | bool
+
+    - role: host_tuning
+      tags: [tuning]
+      when: manage_host_tuning | bool
+
+  post_tasks:
+    - name: Report the prepared host
+      ansible.builtin.debug:
+        msg:
+          - "GPUs detected: {{ preflight_gpu_names | default(['unknown']) | join(', ') }}"
+          - "Driver: {{ preflight_driver_version | default('unknown') }}"
+          - "Docker: {{ docker_engine_version | default('unknown') }}"
+          - "Container GPU access: {{ nvidia_container_toolkit_passthrough | default('not checked') }}"
+          - "Next: make up"
+      tags: [always]

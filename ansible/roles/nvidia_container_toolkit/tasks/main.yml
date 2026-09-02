@@ -1,0 +1,86 @@
+---
+# Without this, `docker run --gpus all` fails with
+# "could not select device driver nvidia with capabilities: [[gpu]]".
+
+- name: Check whether the container toolkit is present
+  ansible.builtin.command: which nvidia-ctk
+  register: nvidia_container_toolkit_check
+  changed_when: false
+  failed_when: false
+
+- name: Install the NVIDIA container toolkit
+  when: nvidia_container_toolkit_check.rc != 0
+  become: true
+  block:
+    - name: Fail on unsupported distributions
+      ansible.builtin.fail:
+        msg: >-
+          Automatic toolkit installation is only wired up for Debian/Ubuntu
+          (found {{ ansible_distribution }}). Follow NVIDIA's instructions for
+          your distro, then re-run with -e manage_nvidia_toolkit=false.
+      when: ansible_os_family != 'Debian'
+
+    - name: Create the keyring directory
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Fetch the NVIDIA container toolkit key
+      ansible.builtin.get_url:
+        url: https://nvidia.github.io/libnvidia-container/gpgkey
+        dest: /tmp/nvidia-container-toolkit.asc
+        mode: "0644"
+
+    - name: Dearmor the key
+      ansible.builtin.command:
+        cmd: gpg --batch --yes --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /tmp/nvidia-container-toolkit.asc
+        creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+    - name: Add the toolkit apt repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg]
+          https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /
+        filename: nvidia-container-toolkit
+        state: present
+
+    - name: Install nvidia-container-toolkit
+      ansible.builtin.apt:
+        name: nvidia-container-toolkit
+        state: present
+        update_cache: true
+
+    - name: Register the runtime with Docker
+      ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
+      register: nvidia_container_toolkit_configure
+      changed_when: "'Using config' in nvidia_container_toolkit_configure.stdout or nvidia_container_toolkit_configure.rc == 0"
+      notify: Restart docker
+
+- name: Flush handlers so the runtime is live before we test it
+  ansible.builtin.meta: flush_handlers
+
+- name: Verify a container can actually see the GPUs
+  ansible.builtin.command: docker run --rm --gpus all {{ nvidia_container_toolkit_smoke_image }} nvidia-smi -L
+  register: nvidia_container_toolkit_gpu_check
+  changed_when: false
+  failed_when: false
+  when: nvidia_container_toolkit_verify | bool
+
+- name: Require working GPU passthrough
+  ansible.builtin.assert:
+    that:
+      - nvidia_container_toolkit_gpu_check.rc == 0
+    fail_msg: |-
+      Containers cannot reach the GPUs. Output was:
+        {{ nvidia_container_toolkit_gpu_check.stderr | default(nvidia_container_toolkit_gpu_check.stdout) | trim }}
+      Usual causes: Docker was not restarted after `nvidia-ctk runtime
+      configure`, or the current user is not in the docker group yet.
+    success_msg: "{{ nvidia_container_toolkit_gpu_check.stdout_lines | default([]) | join(' | ') }}"
+  when: nvidia_container_toolkit_verify | bool
+
+- name: Record whether passthrough is verified
+  ansible.builtin.set_fact:
+    nvidia_container_toolkit_passthrough: >-
+      {{ 'verified' if (nvidia_container_toolkit_verify | bool and nvidia_container_toolkit_gpu_check.rc == 0)
+         else 'not checked' }}
