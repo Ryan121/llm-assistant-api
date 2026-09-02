@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.1.5 (2026-09-02)
+
+### Bug Fixes
+
+- Resolve incorrectly formatted payload info into model
+  ([`3b8b5f1`](https://github.com/Ryan121/llm-assistant-api/commit/3b8b5f1433153863367c63cd8e51bb42cce6d2f6))
+
+
 ## v0.1.4 (2026-09-02)
 
 ### Bug Fixes
