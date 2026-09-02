@@ -14,6 +14,12 @@ That prepares the host, provisions the Docker resources, downloads the model,
 starts the stack, waits for it to serve, proves it works end to end, and prints
 your VS Code configuration.
 
+Restart & test
+
+```bash
+make restart && make wait && make smoke
+```
+
 ---
 
 ## What you get
