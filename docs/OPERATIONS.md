@@ -97,9 +97,18 @@ each other. Two causes, in order of likelihood:
 registered with Docker. `make provision` fixes it; it also restarts Docker,
 which is required for the change to take.
 
-**`docker: permission denied` on the socket.** You were added to the `docker`
-group during provisioning but your shell predates it. Log out and back in, or
-`newgrp docker`.
+**`docker: permission denied` on the socket.** `make provision` added you to the
+`docker` group, but this login session was created before that and still
+carries the old supplementary groups. The playbook stops here on purpose,
+because Terraform, Compose and `make up` all talk to the socket as you:
+
+```bash
+newgrp docker && make quickstart     # new group in this shell
+sg docker -c 'make quickstart'       # one-off, no re-login
+```
+
+Or reconnect the SSH session. Provisioning is already done, so re-running it
+after re-login is a no-op.
 
 **Model download fails with 401/403.** The repo is gated. Accept its licence on
 Hugging Face, put a token in `HF_TOKEN`, then `make pull-model`.

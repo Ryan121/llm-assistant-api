@@ -60,7 +60,12 @@
 - name: Flush handlers so the runtime is live before we test it
   ansible.builtin.meta: flush_handlers
 
+# Run as root deliberately. This asks "is the runtime wired into Docker and can
+# it see the cards", which is a host capability -- mixing it with the deploying
+# user's socket permissions (checked in the docker_engine role) turns one clear
+# failure into two confusing ones.
 - name: Verify a container can actually see the GPUs
+  become: true
   ansible.builtin.command: docker run --rm --gpus all {{ nvidia_container_toolkit_smoke_image }} nvidia-smi -L
   register: nvidia_container_toolkit_gpu_check
   changed_when: false
@@ -74,8 +79,10 @@
     fail_msg: |-
       Containers cannot reach the GPUs. Output was:
         {{ nvidia_container_toolkit_gpu_check.stderr | default(nvidia_container_toolkit_gpu_check.stdout) | trim }}
-      Usual causes: Docker was not restarted after `nvidia-ctk runtime
-      configure`, or the current user is not in the docker group yet.
+      Usual cause: Docker was not restarted after `nvidia-ctk runtime
+      configure --runtime=docker`. Try `sudo systemctl restart docker` and
+      re-run. If it still fails, check `nvidia-smi` on the host first --
+      the toolkit cannot expose cards the driver is not serving.
     success_msg: "{{ nvidia_container_toolkit_gpu_check.stdout_lines | default([]) | join(' | ') }}"
   when: nvidia_container_toolkit_verify | bool
 

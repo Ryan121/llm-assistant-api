@@ -103,7 +103,33 @@
     name: "{{ ansible_user_id }}"
     groups: docker
     append: true
-  when:
-    - ansible_user_id != 'root'
-    - docker_engine_check.rc != 0
+  when: ansible_user_id != 'root'
   notify: Warn about group re-login
+
+# Everything after provisioning -- terraform, docker compose, make up -- runs
+# as this user against the socket directly, so it is worth failing here with a
+# usable message rather than three steps later with a raw EACCES.
+- name: Check whether the deploying user can reach the Docker socket now
+  ansible.builtin.command: docker info --format '{% raw %}{{.ServerVersion}}{% endraw %}'
+  register: docker_engine_socket_check
+  changed_when: false
+  failed_when: false
+  become: false
+
+- name: Require socket access, or explain how to get it
+  ansible.builtin.assert:
+    that:
+      - docker_engine_socket_check.rc == 0
+    fail_msg: |-
+      {{ ansible_user_id }} is in the docker group in /etc/group, but this
+      login session was created before that and still carries the old
+      supplementary groups. Nothing else can talk to Docker until that is
+      refreshed. Pick one:
+
+        newgrp docker && make quickstart     # new group in this shell
+        sg docker -c 'make quickstart'       # one-off, no re-login
+        <log out and back in>                # or reconnect the SSH session
+
+      Provisioning itself is done -- re-running it after re-login is a no-op.
+    success_msg: "docker socket reachable as {{ ansible_user_id }} (server {{ docker_engine_socket_check.stdout | trim }})"
+  when: ansible_user_id != 'root'
