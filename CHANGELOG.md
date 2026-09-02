@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.1.1 (2026-09-02)
+
+### Bug Fixes
+
+- Resolve ansible yaml package ref mismatch
+  ([`dc2285d`](https://github.com/Ryan121/llm-assistant-api/commit/dc2285da6181b79bc18fa03edfe705d1b306514f))
+
+
 ## v0.1.0 (2026-09-02)
 
 ### Features
