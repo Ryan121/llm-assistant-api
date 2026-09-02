@@ -133,8 +133,13 @@ GATEWAY_HOST=10.0.0.21 make vscode-config
 
 ## Connect VS Code
 
+Use **[Continue](https://marketplace.visualstudio.com/items?itemName=Continue.continue)**
+— no third-party account, and one config covers chat, inline edit, agent mode
+and autocomplete:
+
 ```bash
-make vscode-config      # print config for Continue, Cline, Roo, Copilot BYOK
+code --install-extension Continue.continue
+make vscode-config      # print config for every supported extension
 make vscode-install     # write ~/.continue/config.yaml (backs up any existing one)
 ```
 
@@ -143,6 +148,19 @@ make vscode-install     # write ~/.continue/config.yaml (backs up any existing o
 | Base URL | `http://127.0.0.1:8080/v1` |
 | API key | first entry of `API_KEYS` in `.env` |
 | Model | value of `MODEL_ID` |
+
+If VS Code runs somewhere other than the GPU box, tunnel rather than exposing
+the port — there is no TLS in front of the gateway:
+
+```bash
+ssh -N -L 8080:127.0.0.1:8080 ubuntu@gpu-01
+```
+
+Cline/Roo Code also work (OpenAI Compatible provider). The **built-in VS Code
+chat** can be pointed here too, but the model picker and its bring-your-own-key
+flow belong to the GitHub Copilot Chat extension rather than to VS Code, so it
+needs that extension plus a signed-in Copilot entitlement — and it replaces the
+chat model only, leaving completions with GitHub.
 
 Per-extension walkthroughs and troubleshooting: **[docs/VSCODE.md](docs/VSCODE.md)**.
 

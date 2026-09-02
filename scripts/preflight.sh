@@ -35,9 +35,45 @@ if have nvidia-smi; then
   else
     for gpu in "${gpus[@]}"; do ok "$gpu"; done
     tp="$(env_get TENSOR_PARALLEL_SIZE 2)"
-    (( ${#gpus[@]} >= tp )) \
-      && ok "${#gpus[@]} GPU(s) available for TENSOR_PARALLEL_SIZE=$tp" \
-      || fail "TENSOR_PARALLEL_SIZE=$tp but only ${#gpus[@]} GPU(s) present"
+    pp="$(env_get PIPELINE_PARALLEL_SIZE 1)"
+    needed=$(( tp * pp ))
+    (( ${#gpus[@]} >= needed )) \
+      && ok "${#gpus[@]} GPU(s) available for TP=$tp x PP=$pp" \
+      || fail "TP=$tp x PP=$pp needs $needed GPU(s) but only ${#gpus[@]} present"
+  fi
+
+  # Tensor parallelism all-reduces once per layer, so it is the mode that cares
+  # about the link between the cards. Catch a bad topology here rather than as
+  # an EngineDeadError half an hour into real use.
+  if (( $(env_get TENSOR_PARALLEL_SIZE 2) > 1 )); then
+    topo="$(nvidia-smi topo -m 2>/dev/null | awk '/^GPU0/ {print $3; exit}')"
+    case "$topo" in
+      NV*)
+        ok "GPU interconnect: $topo (NVLink) - tensor parallelism is a good fit"
+        ;;
+      PIX|PXB)
+        ok "GPU interconnect: $topo (PCIe, no host bridge)"
+        ;;
+      PHB|NODE|SYS)
+        warn "GPU interconnect: $topo - PCIe via the host bridge, no NVLink."
+        warn "  Tensor parallelism can hang mid-generation on this topology."
+        warn "  Recommended: NCCL_P2P_DISABLE=1 and add --disable-custom-all-reduce"
+        warn "  to VLLM_EXTRA_ARGS. See MULTI-GPU STABILITY in .env.example."
+        ;;
+      *)
+        dim "GPU interconnect: could not determine from nvidia-smi topo -m"
+        ;;
+    esac
+
+    # Passed-through GPUs almost always mean ACS is on, which breaks P2P.
+    if [[ -r /sys/class/dmi/id/sys_vendor ]] \
+       && grep -qiE 'qemu|kvm|vmware|xen|virtual|microsoft corporation' \
+            /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name 2>/dev/null; then
+      warn "Virtualised host detected - GPUs are passed through."
+      warn "  GPU peer-to-peer is unreliable under the ACS that passthrough needs."
+      warn "  Set NCCL_P2P_DISABLE=1 and --disable-custom-all-reduce, or use"
+      warn "  TENSOR_PARALLEL_SIZE=1 with PIPELINE_PARALLEL_SIZE=2."
+    fi
   fi
 
   driver="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -1)"

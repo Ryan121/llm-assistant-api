@@ -63,9 +63,12 @@ mkdir -p "$REPO_ROOT/vscode"
   echo "  - provider: codebase"
 } >"$OUT"
 
-step "Continue (recommended: chat + edit + agent + autocomplete)"
+step "Continue -- RECOMMENDED (chat + edit + agent + autocomplete, no account needed)"
 dim "$OUT"
 sed 's/^/    /' "$OUT"
+echo
+info "Install it with:  code --install-extension Continue.continue"
+info "Then:             make vscode-install"
 
 if $INSTALL; then
   target="$HOME/.continue/config.yaml"
@@ -86,12 +89,16 @@ info "API Key .............. ${KEY}"
 info "Model ID ............. ${MODEL}"
 dim  "Tick 'supports images' off, and enable function/tool calling."
 
-step "GitHub Copilot Chat (bring your own key)"
-info "Manage Models -> OpenAI Compatible -> Base URL ${BASE}, key ${KEY}"
+step "Built-in VS Code chat -- only worth it if you already have Copilot"
+info "Chat -> model picker -> Manage Models -> OpenAI Compatible"
+info "Base URL ${BASE}, key ${KEY}"
+dim  "No model picker? It belongs to the GitHub Copilot Chat extension, not to"
+dim  "VS Code. Requires that extension plus a signed-in Copilot entitlement,"
+dim  "and it replaces the chat model only - completions stay with GitHub."
 
 step "Zed / any OpenAI SDK client"
 info "OPENAI_BASE_URL=${BASE}"
 info "OPENAI_API_KEY=${KEY}"
 
 echo
-dim "Full walkthrough and screenshots: docs/VSCODE.md"
+dim "Full walkthrough and troubleshooting: docs/VSCODE.md"

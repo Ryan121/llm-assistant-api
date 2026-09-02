@@ -61,6 +61,33 @@ With `--enable-prefix-caching` on (it is, in `VLLM_EXTRA_ARGS`) the repeated
 system prompt and file context across an agent's tool-call loop is shared
 rather than recomputed, which is a large real-world win.
 
+### Check your interconnect before committing to TP=2
+
+The arithmetic above assumes tensor parallelism is viable, which depends on the
+link between the cards rather than on the cards themselves:
+
+```bash
+nvidia-smi topo -m      # NV1/NV2 = NVLink bridge fitted
+nvidia-smi nvlink -s    # "all links are inActive" = no bridge
+```
+
+`NV#` — go ahead, TP=2 as documented.
+
+`PHB`, `NODE` or `SYS` (PCIe via the host bridge, no NVLink), **or GPUs passed
+through to a VM** — TP=2 all-reduces once per layer over a link that may not
+sustain peer-to-peer, which shows up as an `EngineDeadError` half an hour into
+real use rather than as a startup failure. Set `NCCL_P2P_DISABLE=1` and
+`--disable-custom-all-reduce`, and consider one of these instead:
+
+| Configuration | Trade |
+| --- | --- |
+| `TENSOR_PARALLEL_SIZE=1`, `PIPELINE_PARALLEL_SIZE=2` | Point-to-point at one layer boundary instead of a per-layer all-reduce. Slightly higher latency, far more robust. Keeps BF16 and the full 30B. |
+| One card, INT4 (`--quantization awq_marlin`) | ~17 GB for a 30B checkpoint, so it fits a single A6000 with a big KV cache and issues no collective at all. Some quality loss; frees the second card for a separate replica. |
+
+`make preflight` checks both the topology and whether it is running on a
+hypervisor, and warns accordingly. Details in
+[OPERATIONS.md](OPERATIONS.md#known-failure-modes).
+
 **Do not trust these numbers over the server's own.** vLLM prints the
 authoritative figure at startup:
 
