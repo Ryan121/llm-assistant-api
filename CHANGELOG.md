@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.2.1 (2026-09-02)
+
+### Bug Fixes
+
+- Further payload mismatch
+  ([`30c737f`](https://github.com/Ryan121/llm-assistant-api/commit/30c737fdda55ed72969dcd3190a0cdd80c4000eb))
+
+
 ## v0.2.0 (2026-09-02)
 
 ### Bug Fixes
