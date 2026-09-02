@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.1.4 (2026-09-02)
+
+### Bug Fixes
+
+- Further revisions to ensure the previous changes are utilised
+  ([`6e132b5`](https://github.com/Ryan121/llm-assistant-api/commit/6e132b5c5a5d4dfe28e703cb863210331c23c49b))
+
+
 ## v0.1.3 (2026-09-02)
 
 ### Bug Fixes
