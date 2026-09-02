@@ -52,9 +52,7 @@ def require_api_key(
     # compare_digest against every key so the reply time does not leak which
     # prefix matched. It requires ASCII, and a non-ASCII token would otherwise
     # raise TypeError and surface as a 500 instead of a 401.
-    if not presented.isascii() or not any(
-        hmac.compare_digest(presented, key) for key in accepted
-    ):
+    if not presented.isascii() or not any(hmac.compare_digest(presented, key) for key in accepted):
         # Logged server-side so the operator can compare the two sides without
         # the client having to paste its key anywhere.
         log.warning(
