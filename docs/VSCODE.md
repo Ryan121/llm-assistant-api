@@ -193,8 +193,23 @@ make ps         # are both containers running?
 
 If VS Code is on another machine, check the SSH tunnel is still open.
 
-**401 in the extension.** The key must be the *first* comma-separated entry of
-`API_KEYS`, verbatim. Re-run `make vscode-config` and copy from there.
+**401 in the extension.** Three places can disagree — `.env`, the running
+container, and the editor's config. Don't guess which:
+
+```bash
+make check-auth
+```
+
+That prints a non-secret fingerprint of the key on each side and then makes a
+live request, so it tells you exactly which one is wrong.
+
+The single most common cause: **the gateway reads `API_KEYS` once at startup**,
+so editing `.env` without recreating the container leaves it on the old value.
+`make restart-api` fixes it and leaves the model loaded.
+
+Otherwise the key must be the *first* comma-separated entry of `API_KEYS`,
+verbatim — re-run `make vscode-config`, then **reload the VS Code window**,
+because Continue caches its config.
 
 **Chat works, agent mode does nothing.** The tool-call parser does not match
 the model family. Check it:

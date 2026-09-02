@@ -18,7 +18,9 @@ fi
 # Only generate a key if the operator has not chosen one.
 if [[ -z "$(env_get API_KEYS)" ]]; then
   step "Generating a gateway API key"
-  key="sk-local-$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)"
+  # cut, not `head -c 32`: head closes the pipe as soon as it has its bytes,
+  # which can kill tr with SIGPIPE and trip `set -o pipefail`.
+  key="sk-local-$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | cut -c1-32)"
   # Portable in-place edit: BSD and GNU sed disagree about -i.
   tmp="$(mktemp)"
   awk -v key="$key" '/^API_KEYS=/ && !done { print "API_KEYS=" key; done=1; next } { print }' \

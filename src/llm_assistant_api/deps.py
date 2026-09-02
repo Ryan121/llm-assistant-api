@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 
 import httpx
 from fastapi import Depends, HTTPException, Request, status
@@ -11,7 +12,16 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from .config import Settings
 from .errors import error_body
 
+log = logging.getLogger(__name__)
+
 _bearer = HTTPBearer(auto_error=False)
+
+
+def _describe(token: str) -> str:
+    """A comparable, non-secret fingerprint for the logs."""
+    if not token:
+        return "no bearer token"
+    return f"token {token[:8]}... (length {len(token)})"
 
 
 def get_settings(request: Request) -> Settings:
@@ -40,12 +50,25 @@ def require_api_key(
 
     presented = credentials.credentials if credentials else ""
     # compare_digest against every key so the reply time does not leak which
-    # prefix matched.
-    if not any(hmac.compare_digest(presented, key) for key in accepted):
+    # prefix matched. It requires ASCII, and a non-ASCII token would otherwise
+    # raise TypeError and surface as a 500 instead of a 401.
+    if not presented.isascii() or not any(
+        hmac.compare_digest(presented, key) for key in accepted
+    ):
+        # Logged server-side so the operator can compare the two sides without
+        # the client having to paste its key anywhere.
+        log.warning(
+            "rejected request: presented %s, gateway has %d key(s) configured",
+            _describe(presented),
+            len(accepted),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=error_body(
-                "Incorrect API key provided. Set the key configured in API_KEYS.",
+                "Incorrect API key provided. "
+                f"This gateway has {len(accepted)} key(s) configured; run "
+                "`make vscode-config` on the host to print the expected value, "
+                "and `make check-auth` if the editor is already using it.",
                 "invalid_request_error",
                 "invalid_api_key",
             ),

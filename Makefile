@@ -181,6 +181,10 @@ wait: ## Block until the model is loaded and serving
 show-config: ## Compare .env vs what Compose passes vs what the engine is running
 	@scripts/show-vllm-config.sh
 
+.PHONY: check-auth
+check-auth: ## Diagnose a 401: compare .env, the container, and a live request
+	@scripts/check-auth.sh
+
 .PHONY: health
 health: ## Show gateway liveness and readiness
 	@curl -fsS http://127.0.0.1:$(API_PORT)/healthz && echo
