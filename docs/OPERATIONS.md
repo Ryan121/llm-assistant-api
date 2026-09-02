@@ -149,13 +149,60 @@ nvidia-smi -q -d POWER,TEMPERATURE        # sustained throttling or a marginal P
   interconnect. Peer-to-peer between the cards goes over
   PCIe via the host bridge, and vLLM's own all-reduce kernel — enabled by
   default, visible as `disable_custom_all_reduce=False` in the startup config
-  dump — assumes P2P works. Its probe is a small test transfer that can pass on
-  a topology that then wedges under sustained load. Fix:
+  dump — needs P2P to work. It does not check: `VLLM_SKIP_P2P_CHECK` defaults
+  to `1`, so vLLM trusts the driver's report rather than verifying. Fix:
 
   ```bash
   NCCL_P2P_DISABLE=1
+  VLLM_SKIP_P2P_CHECK=0
   VLLM_EXTRA_ARGS=--enable-prefix-caching --disable-log-requests --disable-custom-all-reduce
   ```
+
+  All three are needed. `NCCL_P2P_DISABLE` only affects NCCL, and the custom
+  all-reduce kernel uses CUDA IPC directly — so disabling P2P for NCCL alone
+  leaves the broken path in use. There is no `VLLM_DISABLE_CUSTOM_ALL_REDUCE`
+  env var; the CLI flag is the only unconditional switch.
+
+  **Then prove it landed.** Editing `.env` is not the same as restarting the
+  engine, and vLLM states its effective configuration only once, in a single
+  line at startup:
+
+  ```bash
+  make show-config    # must report disable_custom_all_reduce=True
+  ```
+
+  That target compares three things — what `.env` asks for, what Compose
+  passes, and what the running engine reports — and tells you which stage lost
+  your change. It also warns about duplicate keys in `.env`, where the last
+  definition silently wins.
+
+**The same root cause has a second signature: corrupted data instead of a
+hang.** Look for any of these, which arrive together:
+
+```
+TypeError: argument 'id': StreamInput must be either an integer or a list of integers
+ScatterGatherKernel.cu:163: Assertion `idx_dim >= 0 && idx_dim < index_size' failed
+torch.AcceleratorError: CUDA error: device-side assert triggered
+RuntimeError: Worker failed with error 'CUDA error: device-side assert triggered'
+```
+
+Read that chain backwards. A GPU kernel indexed out of bounds, so the sampled
+token ids are garbage; the detokenizer is then handed a token id that is
+negative or beyond the vocabulary and its Rust binding rejects the type. For a
+MoE model the out-of-bounds index is usually the expert router: corrupted
+logits produce a top-k expert index outside the expert count, and the gather
+asserts.
+
+The detokenizer `TypeError` often appears *first* in the log because the API
+server is a separate process and receives the bad ids before the worker reaches
+its next CUDA sync point. It is a symptom, not the fault. CUDA errors are
+asynchronous — the log says so itself — so do not trust the reported stack
+location.
+
+Both TP workers asserting in the same millisecond, with
+`disable_custom_all_reduce=False` in the dump, means the corruption came from
+the collective. Same fix as above. A hang and a device-side assert are the two
+ways one broken interconnect presents itself; which one you get is luck.
 
 **On a VM with passed-through GPUs this is close to a certainty, not a
 possibility.** The ACS that passthrough needs for per-device IOMMU groups

@@ -177,6 +177,10 @@ deploy-remote: ## Ship the repo to the inventory host and deploy over SSH
 wait: ## Block until the model is loaded and serving
 	@scripts/wait-for-ready.sh
 
+.PHONY: show-config
+show-config: ## Compare .env vs what Compose passes vs what the engine is running
+	@scripts/show-vllm-config.sh
+
 .PHONY: health
 health: ## Show gateway liveness and readiness
 	@curl -fsS http://127.0.0.1:$(API_PORT)/healthz && echo

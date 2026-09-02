@@ -51,6 +51,10 @@ services:
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0,1}
       NCCL_P2P_DISABLE: ${NCCL_P2P_DISABLE:-0}
       NCCL_DEBUG: ${NCCL_DEBUG:-WARN}
+      # vLLM's default of 1 means it never verifies P2P and trusts the driver.
+      # Set to 0 on a virtualised or PHB-only host so it checks and disables
+      # its custom all-reduce kernel itself.
+      VLLM_SKIP_P2P_CHECK: ${VLLM_SKIP_P2P_CHECK:-1}
       VLLM_WORKER_MULTIPROC_METHOD: spawn
       VLLM_API_KEY: ${UPSTREAM_API_KEY:-}
       # Seconds the engine core waits for a tensor-parallel worker to answer a
