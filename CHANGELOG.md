@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.1.2 (2026-09-02)
+
+### Bug Fixes
+
+- Docker perm error denied fix
+  ([`4830050`](https://github.com/Ryan121/llm-assistant-api/commit/483005075cf8c4a9eb567999af116df9b8afa9b9))
+
+
 ## v0.1.1 (2026-09-02)
 
 ### Bug Fixes
