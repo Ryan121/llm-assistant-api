@@ -22,7 +22,7 @@ class RateLimitConfig:
 class RateLimiter:
     """Simple sliding window rate limiter."""
 
-    def __init__(self, config: RateLimitConfig | None = None):
+    def __init__(self, config: RateLimitConfig | None = None) -> None:
         if config is None:
             config = RateLimitConfig()
         self.config = config
