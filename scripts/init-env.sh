@@ -37,6 +37,6 @@ step "Deployment will use"
 info "MODEL_ID              $(env_get MODEL_ID)"
 info "TENSOR_PARALLEL_SIZE  $(env_get TENSOR_PARALLEL_SIZE 2)"
 info "MAX_MODEL_LEN         $(env_get MAX_MODEL_LEN 131072)"
-info "API_PORT              $(env_get API_PORT 8080)"
+info "API_PORT              $(env_get API_PORT 8081)"
 echo
 dim "Edit .env to change the model, then re-run 'make up'."

@@ -104,7 +104,7 @@ version="$(curl -fsS --max-time 5 "$base/version" 2>/dev/null || true)"
 if [[ "$version" != *'"llm-assistant-api"'* ]]; then
   warn "something is listening on $base, but it is not this gateway."
   warn "  /version did not identify as llm-assistant-api. Another service is"
-  warn "  holding port $(env_get API_PORT 8080), so the 401 is not ours."
+  warn "  holding port $(env_get API_PORT 8081), so the 401 is not ours."
   info "It replied: ${version:-<no /version endpoint>}"
   echo
   die "free the port or change API_PORT in .env"

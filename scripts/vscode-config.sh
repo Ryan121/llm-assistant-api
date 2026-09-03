@@ -12,7 +12,7 @@ INSTALL=false
 [[ "${1:-}" == "--install" ]] && INSTALL=true
 
 MODEL="$(env_get MODEL_ID)"
-PORT="$(env_get API_PORT 8080)"
+PORT="$(env_get API_PORT 8081)"
 KEY="$(env_get API_KEYS)"; KEY="${KEY%%,*}"
 KEY="${KEY:-not-required}"
 FIM_MODEL="$(env_get AUTOCOMPLETE_MODEL_ID Qwen/Qwen2.5-Coder-1.5B)"

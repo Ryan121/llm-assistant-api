@@ -29,7 +29,7 @@ make restart && make wait && make smoke
 ┌───────────┐        ┌──────────────────────┐
 │ Continue  │        │  llm-assistant-api   │  ┌───────────┐   ┌──────────┐
 │ Cline     │──────▶ │  FastAPI gateway     │─▶│   vLLM    │──▶│ A6000 #0 │
-│ Roo Code  │  :8080 │  · bearer auth       │  │  TP = 2   │   ├──────────┤
+│ Roo Code  │  :8081 │  · bearer auth       │  │  TP = 2   │   ├──────────┤
 │ Copilot   │  /v1   │  · model routing     │  │  BF16     │──▶│ A6000 #1 │
 └───────────┘        │  · SSE streaming     │  └───────────┘   └──────────┘
                      │  · token ceiling     │        │
@@ -151,7 +151,7 @@ make vscode-install     # write ~/.continue/config.yaml (backs up any existing o
 
 | | |
 | --- | --- |
-| Base URL | `http://127.0.0.1:8080/v1` |
+| Base URL | `http://127.0.0.1:8081/v1` |
 | API key | first entry of `API_KEYS` in `.env` |
 | Model | value of `MODEL_ID` |
 
@@ -159,7 +159,7 @@ If VS Code runs somewhere other than the GPU box, tunnel rather than exposing
 the port — there is no TLS in front of the gateway:
 
 ```bash
-ssh -N -L 8080:127.0.0.1:8080 ubuntu@gpu-01
+ssh -N -L 8081:127.0.0.1:8081 ubuntu@gpu-01
 ```
 
 Cline/Roo Code also work (OpenAI Compatible provider). The **built-in VS Code
@@ -180,7 +180,7 @@ Ansible. The ones that matter most:
 | --- | --- | --- |
 | `MODEL_ID` | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | Any Hugging Face repo vLLM can serve |
 | `API_KEYS` | generated | Comma-separated bearer tokens. **Empty means no auth.** |
-| `API_PORT` | `8080` | Host port for the gateway |
+| `API_PORT` | `8081` | Host port for the gateway |
 | `TENSOR_PARALLEL_SIZE` | `2` | GPUs to shard across |
 | `MAX_MODEL_LEN` | `131072` | Context window. The main lever on concurrency. |
 | `GPU_MEMORY_UTILIZATION` | `0.90` | Drop to `0.85` if you hit OOM at startup |

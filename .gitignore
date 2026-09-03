@@ -37,3 +37,6 @@ ansible/collections/
 .DS_Store
 .idea/
 *.swp
+
+./continue
+.continue

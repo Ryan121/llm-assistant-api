@@ -17,6 +17,7 @@ from .. import __version__
 from ..config import Settings
 from ..deps import get_http_client, get_settings
 from ..proxy import probe_upstream
+from ..metrics import metrics_collector
 
 router = APIRouter(tags=["operations"])
 
@@ -54,4 +55,13 @@ async def version(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
         "version": __version__,
         "models": settings.served_models(),
         "authenticated": bool(settings.api_key_set),
+    }
+
+
+@router.get("/metrics", summary="Get application metrics")
+async def metrics() -> dict[str, Any]:
+    """Return application performance metrics."""
+    return {
+        "summary": metrics_collector.get_summary(),
+        "request_stats": metrics_collector.get_request_stats()
     }

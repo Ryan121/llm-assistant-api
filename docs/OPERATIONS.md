@@ -272,7 +272,7 @@ docker run --rm -v llm-assistant-model-cache:/models alpine \
 
 This is built for a trusted network. Defaults worth knowing:
 
-- The gateway binds `0.0.0.0:8080` **inside the container**, published to the
+- The gateway binds `0.0.0.0:8081` **inside the container**, published to the
   host port `API_PORT`. Anyone who can reach that port and holds a key can use
   the GPU. `make env` generates a key so it is never accidentally open, and the
   gateway logs a warning on every start if `API_KEYS` is blank.

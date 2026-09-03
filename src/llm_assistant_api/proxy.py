@@ -66,8 +66,19 @@ def resolve_target(settings: Settings, requested_model: str | None) -> Target:
     enabled. Everything else goes to the primary model. An unrecognised name
     falls back to the primary model when ``MODEL_ALIAS_FALLBACK`` is on, which
     is what makes editor plugins with hard-coded model names work unchanged.
+    
+    Args:
+        settings: Application settings
+        requested_model: The model name requested by the client
+        
+    Returns:
+        Target object specifying where to route the request and which model ID to use
+        
+    Raises:
+        ModelNotFoundError: When model alias fallback is disabled and model is not recognized
     """
     if requested_model and requested_model in settings.autocomplete_aliases:
+        log.debug("Routing request for autocomplete model %r to autocomplete upstream", requested_model)
         return Target(
             settings.autocomplete_base_url,
             settings.autocomplete_model_id,
@@ -76,9 +87,11 @@ def resolve_target(settings: Settings, requested_model: str | None) -> Target:
 
     if requested_model and requested_model != settings.model_id:
         if not settings.model_alias_fallback:
+            log.warning("Model %r not found in available models: %s", requested_model, settings.served_models())
             raise ModelNotFoundError(requested_model, settings.served_models())
-        log.debug("aliasing requested model %r to %r", requested_model, settings.model_id)
+        log.debug("Aliasing requested model %r to primary model %r", requested_model, settings.model_id)
 
+    log.debug("Routing request to primary model %r", settings.model_id)
     return Target(settings.upstream_base_url, settings.model_id, settings.upstream_api_key)
 
 
@@ -91,23 +104,27 @@ def prepare_payload(payload: dict[str, Any], target: Target, settings: Settings)
         prepared, normalize_tool_arguments=settings.normalize_tool_arguments
     )
     for note in notes:
-        log.info("normalised inbound payload - %s", note)
+        log.info("Normalised inbound payload - %s", note)
 
     cap = settings.max_tokens_cap
     if cap > 0:
+        # Apply token cap to both max_tokens and max_completion_tokens fields
         for field in ("max_tokens", "max_completion_tokens"):
             requested = prepared.get(field)
             if isinstance(requested, int) and requested > cap:
                 prepared[field] = cap
+                log.debug("Applied token cap of %d to %s", cap, field)
         # An unbounded request would otherwise be free to run to the context
         # limit and hold a KV-cache slot for minutes.
         if prepared.get("max_tokens") is None and prepared.get("max_completion_tokens") is None:
             prepared["max_tokens"] = cap
+            log.debug("Applied default token cap of %d to max_tokens", cap)
 
     return prepared
 
 
 def _passthrough_headers(upstream: httpx.Response) -> dict[str, str]:
+    """Filter out hop-by-hop headers that shouldn't be forwarded to the client."""
     return {k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP}
 
 
@@ -120,6 +137,7 @@ async def forward(
     stream: bool,
 ) -> Response:
     """Send ``payload`` to ``target`` and adapt the reply for our caller."""
+    log.debug("Forwarding request to %s:%s with stream=%s", target.base_url, path, stream)
     if stream:
         return await _forward_stream(client, path, payload, target)
     return await _forward_json(client, path, payload, target)
@@ -129,10 +147,14 @@ async def _forward_json(
     client: httpx.AsyncClient, path: str, payload: dict[str, Any], target: Target
 ) -> Response:
     try:
+        log.debug("Making JSON request to %s", target.url(path))
         upstream = await client.post(target.url(path), json=payload, headers=target.headers())
+        log.debug("Received JSON response with status %d", upstream.status_code)
     except httpx.TimeoutException as exc:
+        log.error("Upstream timeout when connecting to %s: %s", target.base_url, exc)
         raise UpstreamError(f"Upstream timed out: {exc}", status_code=504) from exc
     except httpx.HTTPError as exc:
+        log.error("Cannot reach model server at %s: %s", target.base_url, exc)
         raise UpstreamError(f"Cannot reach model server at {target.base_url}: {exc}") from exc
 
     return Response(
@@ -151,17 +173,22 @@ async def _forward_stream(
     would already be committed by the time an upstream 4xx arrived, and the
     editor would see an empty 200.
     """
+    log.debug("Opening streaming request to %s", target.url(path))
     request = client.build_request("POST", target.url(path), json=payload, headers=target.headers())
     try:
         upstream = await client.send(request, stream=True)
+        log.debug("Received streaming response with status %d", upstream.status_code)
     except httpx.TimeoutException as exc:
+        log.error("Upstream timeout during streaming to %s: %s", target.base_url, exc)
         raise UpstreamError(f"Upstream timed out: {exc}", status_code=504) from exc
     except httpx.HTTPError as exc:
+        log.error("Cannot reach model server at %s during streaming: %s", target.base_url, exc)
         raise UpstreamError(f"Cannot reach model server at {target.base_url}: {exc}") from exc
 
     if upstream.status_code >= 400:
         body = await upstream.aread()
         await upstream.aclose()
+        log.warning("Upstream returned error status %d: %s", upstream.status_code, body[:200])
         return Response(
             content=body,
             status_code=upstream.status_code,
@@ -173,7 +200,7 @@ async def _forward_stream(
             async for chunk in upstream.aiter_raw():
                 yield chunk
         except httpx.HTTPError as exc:  # mid-stream failure: no status left to set
-            log.warning("stream aborted by upstream: %s", exc)
+            log.warning("Stream aborted by upstream: %s", exc)
         finally:
             await upstream.aclose()
 
@@ -194,11 +221,13 @@ async def list_upstream_models(
 ) -> list[dict[str, Any]] | None:
     """Best-effort ``GET /models`` against an upstream. ``None`` on failure."""
     try:
+        log.debug("Listing upstream models from %s", target.url("models"))
         upstream = await client.get(target.url("models"), headers=target.headers(), timeout=10.0)
         upstream.raise_for_status()
         data = upstream.json().get("data")
+        log.debug("Retrieved %d upstream models", len(data) if data else 0)
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        log.debug("upstream model listing unavailable: %s", exc)
+        log.debug("Upstream model listing unavailable: %s", exc)
         return None
     return data if isinstance(data, list) else None
 
@@ -210,7 +239,11 @@ async def probe_upstream(client: httpx.AsyncClient, base_url: str) -> bool:
     """
     root = base_url.rstrip("/").removesuffix("/v1")
     try:
+        log.debug("Probing upstream health at %s/health", root)
         response = await client.get(f"{root}/health", timeout=5.0)
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
+        log.warning("Failed to probe upstream health at %s/health: %s", root, exc)
         return False
-    return response.status_code == 200
+    result = response.status_code == 200
+    log.debug("Upstream health probe result: %s", "success" if result else "failure")
+    return result

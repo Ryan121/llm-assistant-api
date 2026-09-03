@@ -13,6 +13,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -25,6 +26,7 @@ from .config import Settings
 from .errors import ModelNotFoundError, UpstreamError, error_body, error_response
 from .logging_config import configure_logging
 from .routes import health, openai_compat
+from .metrics import metrics_collector
 
 log = logging.getLogger(__name__)
 
@@ -98,18 +100,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
         request.state.request_id = request_id
         started = time.perf_counter()
-        response = await call_next(request)
-        elapsed_ms = (time.perf_counter() - started) * 1000
-        response.headers["x-request-id"] = request_id
-        log.info(
-            "%s %s -> %d in %.0fms rid=%s",
-            request.method,
-            request.url.path,
-            response.status_code,
-            elapsed_ms,
-            request_id,
-        )
-        return response
+        
+        # Track request metrics
+        endpoint = request.url.path
+        model = request.query_params.get("model") or "unknown"
+        streamed = request.query_params.get("stream", "false").lower() == "true"
+        
+        metrics = metrics_collector.start_request(request_id, endpoint, model, streamed)
+        
+        try:
+            response = await call_next(request)
+            metrics.finish(response.status_code)
+            metrics_collector.finish_request(request_id, response.status_code)
+            
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            response.headers["x-request-id"] = request_id
+            log.info(
+                "%s %s -> %d in %.0fms rid=%s",
+                request.method,
+                request.url.path,
+                response.status_code,
+                elapsed_ms,
+                request_id,
+            )
+            return response
+        except Exception as e:
+            # Ensure cleanup even on exceptions
+            metrics.finish(500)
+            metrics_collector.finish_request(request_id, 500)
+            raise
 
     # Registered on Starlette's base class so router-level 404s get the same
     # envelope as our own aborts; fastapi.HTTPException is a subclass of it.

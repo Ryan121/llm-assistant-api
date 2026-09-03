@@ -14,7 +14,7 @@ SHELL := /usr/bin/env bash
 ENV_FILE ?= .env
 -include $(ENV_FILE)
 
-API_PORT            ?= 8080
+API_PORT            ?= 8081
 API_IMAGE           ?= ghcr.io/ryan121/llm-assistant-api
 API_IMAGE_TAG       ?= local
 MODEL_ID            ?= Qwen/Qwen3-Coder-30B-A3B-Instruct

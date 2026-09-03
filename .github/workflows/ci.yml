@@ -129,23 +129,23 @@ jobs:
       # lets Compose start the gateway while the model is still loading.
       - name: Smoke-test the image
         run: |
-          docker run -d --name gw -p 8080:8080 \
+          docker run -d --name gw -p 8081:8081 \
             -e UPSTREAM_BASE_URL=http://127.0.0.1:9/v1 \
             -e API_KEYS=ci-key \
             llm-assistant-api:ci
           for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+            if curl -fsS http://127.0.0.1:8081/healthz >/dev/null 2>&1; then break; fi
             sleep 1
           done
           echo '--- /healthz'
-          curl -fsS http://127.0.0.1:8080/healthz
+          curl -fsS http://127.0.0.1:8081/healthz
           echo '--- /version'
-          curl -fsS -H 'Authorization: Bearer ci-key' http://127.0.0.1:8080/version
+          curl -fsS -H 'Authorization: Bearer ci-key' http://127.0.0.1:8081/version
           echo '--- /readyz (must be 503: no model server in CI)'
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/readyz)
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/readyz)
           test "$code" = "503" || { echo "expected 503, got $code"; docker logs gw; exit 1; }
           echo '--- unauthenticated /v1/models (must be 401)'
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/v1/models)
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/v1/models)
           test "$code" = "401" || { echo "expected 401, got $code"; docker logs gw; exit 1; }
           docker rm -f gw
 

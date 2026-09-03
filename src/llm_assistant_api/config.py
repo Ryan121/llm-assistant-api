@@ -9,6 +9,7 @@ the environment, which is hostile in a ``.env`` file.
 from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, validator
 
 
 def _split_csv(raw: str) -> tuple[str, ...]:
@@ -76,3 +77,28 @@ class Settings(BaseSettings):
         if self.autocomplete_enabled:
             models.append(self.autocomplete_model_id)
         return models
+
+    # Validation methods
+    @validator("request_timeout_seconds")
+    def validate_request_timeout(cls, v):
+        if v <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+        return v
+
+    @validator("connect_timeout_seconds")
+    def validate_connect_timeout(cls, v):
+        if v <= 0:
+            raise ValueError("connect_timeout_seconds must be positive")
+        return v
+
+    @validator("max_connections")
+    def validate_max_connections(cls, v):
+        if v <= 0:
+            raise ValueError("max_connections must be positive")
+        return v
+
+    @validator("max_tokens_cap")
+    def validate_max_tokens_cap(cls, v):
+        if v < 0:
+            raise ValueError("max_tokens_cap must be non-negative")
+        return v

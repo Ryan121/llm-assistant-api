@@ -48,15 +48,15 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 USER 10001:10001
 
-EXPOSE 8080
+EXPOSE 8081
 
 # Liveness only -- readiness (is the model loaded?) is /readyz, which the
 # deployment scripts poll separately because a cold model pull takes minutes.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=5 \
-    CMD ["python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+    CMD ["python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8081/healthz', timeout=3)"]
 
 # Worker count comes from WEB_CONCURRENCY, which uvicorn reads itself.
 # --no-access-log because the app's own middleware already logs method, path,
 # status, duration and request id -- uvicorn's line is strictly less useful.
 ENTRYPOINT ["uvicorn", "llm_assistant_api.main:app"]
-CMD ["--host", "0.0.0.0", "--port", "8080", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]
+CMD ["--host", "0.0.0.0", "--port", "8081", "--proxy-headers", "--forwarded-allow-ips", "*", "--no-access-log"]

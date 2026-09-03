@@ -10,7 +10,8 @@ import logging
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Body, Depends, Request, Response
+from fastapi import APIRouter, Body, Depends, Request, Response, HTTPException
+from pydantic import BaseModel, ValidationError
 
 from ..config import Settings
 from ..deps import get_http_client, get_settings, require_api_key
@@ -19,6 +20,11 @@ from ..proxy import forward, list_upstream_models, prepare_payload, resolve_targ
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["openai"], dependencies=[Depends(require_api_key)])
+
+
+class ModelsResponse(BaseModel):
+    object: str
+    data: list[dict[str, Any]]
 
 
 @router.get("/models", summary="List the models this gateway serves")
@@ -53,20 +59,35 @@ async def _handle(
     settings: Settings,
     client: httpx.AsyncClient,
 ) -> Response:
-    requested_model = payload.get("model")
-    target = resolve_target(settings, requested_model if isinstance(requested_model, str) else None)
-    prepared = prepare_payload(payload, target, settings)
-    streaming = bool(prepared.get("stream"))
+    try:
+        # Validate payload structure before processing
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid payload format")
+        
+        # Validate required fields
+        if "model" in payload and not isinstance(payload["model"], str):
+            raise HTTPException(status_code=400, detail="Invalid model field")
+            
+        requested_model = payload.get("model")
+        target = resolve_target(settings, requested_model if isinstance(requested_model, str) else None)
+        prepared = prepare_payload(payload, target, settings)
+        streaming = bool(prepared.get("stream"))
 
-    log.info(
-        "forward %s model=%s->%s stream=%s rid=%s",
-        path,
-        requested_model,
-        target.model_id,
-        streaming,
-        getattr(request.state, "request_id", "-"),
-    )
-    return await forward(client, path, prepared, target, stream=streaming)
+        log.info(
+            "forward %s model=%s->%s stream=%s rid=%s",
+            path,
+            requested_model,
+            target.model_id,
+            streaming,
+            getattr(request.state, "request_id", "-"),
+        )
+        return await forward(client, path, prepared, target, stream=streaming)
+    except ValidationError as e:
+        log.error("Payload validation error: %s", str(e))
+        raise HTTPException(status_code=400, detail=f"Invalid payload: {str(e)}")
+    except Exception as e:
+        log.error("Error handling request to %s: %s", path, str(e), exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @router.post("/chat/completions", summary="Chat completions (streaming and blocking)")

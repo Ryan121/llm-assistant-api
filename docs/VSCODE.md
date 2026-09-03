@@ -20,9 +20,9 @@ and API key.
 
 | | Base URL | Model | Key |
 | --- | --- | --- | --- |
-| Same machine as VS Code | `http://127.0.0.1:8080/v1` | value of `MODEL_ID` | first entry in `API_KEYS` |
-| Remote GPU box, tunnelled | `http://127.0.0.1:8080/v1` | same | same |
-| Remote GPU box, direct | `http://<host>:8080/v1` | same | same |
+| Same machine as VS Code | `http://127.0.0.1:8081/v1` | value of `MODEL_ID` | first entry in `API_KEYS` |
+| Remote GPU box, tunnelled | `http://127.0.0.1:8081/v1` | same | same |
+| Remote GPU box, direct | `http://<host>:8081/v1` | same | same |
 
 For the direct case, bake the hostname in:
 
@@ -38,17 +38,17 @@ The gateway speaks plain HTTP; there is no TLS in front of it. So either keep
 it on a trusted LAN, or — recommended — tunnel over SSH and treat it as local:
 
 ```bash
-ssh -N -L 8080:127.0.0.1:8080 ubuntu@gpu-01
+ssh -N -L 8081:127.0.0.1:8081 ubuntu@gpu-01
 ```
 
-Leave that running. The editor then uses `http://127.0.0.1:8080/v1`, and the
+Leave that running. The editor then uses `http://127.0.0.1:8081/v1`, and the
 API key stops being the only thing between your GPUs and the network.
 
 Confirm it before touching the editor — this one command separates "the stack
 is broken" from "my config is wrong":
 
 ```bash
-curl -s -H 'Authorization: Bearer sk-local-...' http://127.0.0.1:8080/v1/models
+curl -s -H 'Authorization: Bearer sk-local-...' http://127.0.0.1:8081/v1/models
 # {"object":"list","data":[{"id":"Qwen/Qwen3-Coder-30B-A3B-Instruct",...}]}
 ```
 
@@ -75,7 +75,7 @@ models:
   - name: Qwen3-Coder-30B-A3B-Instruct
     provider: openai                            # wire format, not the vendor
     model: Qwen/Qwen3-Coder-30B-A3B-Instruct    # your MODEL_ID
-    apiBase: http://127.0.0.1:8080/v1           # the /v1 matters
+    apiBase: http://127.0.0.1:8081/v1           # the /v1 matters
     apiKey: sk-local-...                        # first entry of API_KEYS
     roles: [chat, edit, apply]
     defaultCompletionOptions:
@@ -110,7 +110,7 @@ change, let it edit files and run commands". No account needed either.
 
 1. Install the extension, open its settings.
 2. **API Provider** → `OpenAI Compatible`
-3. **Base URL** → `http://127.0.0.1:8080/v1`
+3. **Base URL** → `http://127.0.0.1:8081/v1`
 4. **API Key** → your `API_KEYS` value
 5. **Model ID** → your `MODEL_ID` value
 6. Leave image support **off** (these are text-only coding models) and make
@@ -143,7 +143,7 @@ With all that in place:
 1. Open **Chat** (`Ctrl/Cmd+Alt+I`).
 2. Click the **model picker** at the bottom of the chat input box.
 3. **Manage Models…** → **OpenAI Compatible**.
-4. **Base URL** → `http://127.0.0.1:8080/v1`
+4. **Base URL** → `http://127.0.0.1:8081/v1`
 5. **API key** → your `API_KEYS` value.
 6. Tick your model in the list, then select it in the picker.
 
@@ -167,7 +167,7 @@ Then the limits:
 ## Zed, Aider, or anything using the OpenAI SDK
 
 ```bash
-export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+export OPENAI_BASE_URL=http://127.0.0.1:8081/v1
 export OPENAI_API_KEY=sk-local-...      # from .env
 
 aider --model openai/Qwen/Qwen3-Coder-30B-A3B-Instruct
