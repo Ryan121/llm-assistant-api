@@ -141,6 +141,159 @@ async def test_replayed_tool_calls_reach_vllm_as_valid_json(
     assert json.loads(sent) == {"path": "a.py"}
 
 
+async def test_malformed_content_and_single_tool_call_object_are_repaired(
+    client: httpx.AsyncClient, upstream: FakeUpstream
+) -> None:
+    upstream.json_response("POST", CHAT_URL, CHAT_REPLY)
+
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": PRIMARY_MODEL,
+            "messages": [
+                {"role": "user", "content": {"text": "read it"}},
+                {
+                    "role": "assistant",
+                    "tool_calls": {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": {"path": "a.py"}},
+                    },
+                },
+            ],
+        },
+    )
+
+    sent_messages = upstream.last_body["messages"]
+    assert sent_messages[0]["content"] == "read it"
+    assert isinstance(sent_messages[1]["tool_calls"], list)
+    assert json.loads(sent_messages[1]["tool_calls"][0]["function"]["arguments"]) == {
+        "path": "a.py"
+    }
+
+
+async def test_invalid_tool_call_arguments_are_left_unchanged(
+    client: httpx.AsyncClient, upstream: FakeUpstream, caplog: pytest.LogCaptureFixture
+) -> None:
+    upstream.json_response("POST", CHAT_URL, CHAT_REPLY)
+
+    payload = {
+        "model": PRIMARY_MODEL,
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "a.py", "body": "unterminated',
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger="llm_assistant_api.toolcalls"):
+        await client.post("/v1/chat/completions", json=payload)
+
+    sent = upstream.last_body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert sent == '{"path": "a.py", "body": "unterminated'
+    assert any("could not be repaired" in record.message for record in caplog.records)
+
+
+async def test_python_literal_tool_call_arguments_are_still_repaired(
+    client: httpx.AsyncClient, upstream: FakeUpstream
+) -> None:
+    upstream.json_response("POST", CHAT_URL, CHAT_REPLY)
+
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": PRIMARY_MODEL,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": "{'path': 'a.py', 'count': 1}",
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    sent = upstream.last_body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(sent) == {"path": "a.py", "count": 1}
+
+
+async def test_empty_tool_call_arguments_are_repaired_by_default(
+    client: httpx.AsyncClient, upstream: FakeUpstream
+) -> None:
+    upstream.json_response("POST", CHAT_URL, CHAT_REPLY)
+
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": PRIMARY_MODEL,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "   "},
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    sent = upstream.last_body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert sent == "{}"
+
+
+async def test_empty_tool_call_arguments_can_be_left_unchanged(
+    gateway_factory: GatewayFactory, upstream: FakeUpstream
+) -> None:
+    client = await gateway_factory(
+        make_settings(normalize_tool_arguments=False, normalize_empty_tool_arguments=False)
+    )
+    upstream.json_response("POST", CHAT_URL, CHAT_REPLY)
+
+    await client.post(
+        "/v1/chat/completions",
+        json={
+            "model": PRIMARY_MODEL,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "   "},
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    sent = upstream.last_body["messages"][0]["tool_calls"][0]["function"]["arguments"]
+    assert sent == "   "
+
+
 async def test_normalisation_can_be_turned_off(
     gateway_factory: GatewayFactory, upstream: FakeUpstream
 ) -> None:

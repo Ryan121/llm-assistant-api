@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     model_alias_fallback: bool = True
     expose_upstream_models: bool = False
     normalize_tool_arguments: bool = True
+    normalize_empty_tool_arguments: bool = True
 
     @property
     def api_key_set(self) -> frozenset[str]:

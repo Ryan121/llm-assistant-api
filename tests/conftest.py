@@ -50,6 +50,7 @@ def make_settings(**overrides: Any) -> Settings:
         "autocomplete_model_id": FIM_MODEL,
         "api_keys": "",
         "log_level": "WARNING",
+        "normalize_empty_tool_arguments": True,
     }
     defaults.update(overrides)
     return IsolatedSettings(**defaults)
