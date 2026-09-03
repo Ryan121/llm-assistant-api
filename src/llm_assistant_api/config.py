@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Tuple
 
 
-def _split_csv(raw: str) -> tuple[str, ...]:
+def _split_csv(raw: str) -> Tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
@@ -81,28 +82,28 @@ class Settings(BaseSettings):
     # Validation methods - using Pydantic V2 field_validator syntax
     @field_validator("request_timeout_seconds")
     @classmethod
-    def validate_request_timeout(cls, v):
+    def validate_request_timeout(cls, v: float) -> float:
         if v <= 0:
             raise ValueError("request_timeout_seconds must be positive")
         return v
 
     @field_validator("connect_timeout_seconds")
     @classmethod
-    def validate_connect_timeout(cls, v):
+    def validate_connect_timeout(cls, v: float) -> float:
         if v <= 0:
             raise ValueError("connect_timeout_seconds must be positive")
         return v
 
     @field_validator("max_connections")
     @classmethod
-    def validate_max_connections(cls, v):
+    def validate_max_connections(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("max_connections must be positive")
         return v
 
     @field_validator("max_tokens_cap")
     @classmethod
-    def validate_max_tokens_cap(cls, v):
+    def validate_max_tokens_cap(cls, v: int) -> int:
         if v < 0:
             raise ValueError("max_tokens_cap must be non-negative")
         return v

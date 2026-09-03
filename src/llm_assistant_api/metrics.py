@@ -4,6 +4,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Dict, Any
 
 
 @dataclass
@@ -18,7 +19,7 @@ class RequestMetrics:
     status_code: int | None = None
     streamed: bool = False
 
-    def finish(self, status_code: int):
+    def finish(self, status_code: int) -> None:
         """Mark request as finished."""
         self.response_time_ms = (time.perf_counter() - self.start_time) * 1000
         self.status_code = status_code
@@ -27,8 +28,8 @@ class RequestMetrics:
 class MetricsCollector:
     """Collects and aggregates metrics for the application."""
 
-    def __init__(self):
-        self._requests: dict[str, RequestMetrics] = {}
+    def __init__(self) -> None:
+        self._requests: Dict[str, RequestMetrics] = {}
         self._endpoint_counts: defaultdict[str, int] = defaultdict(int)
         self._status_code_counts: defaultdict[int, int] = defaultdict(int)
         self._model_usage: defaultdict[str, int] = defaultdict(int)
@@ -50,7 +51,7 @@ class MetricsCollector:
         self._endpoint_counts[endpoint] += 1
         return metrics
 
-    def finish_request(self, request_id: str, status_code: int):
+    def finish_request(self, request_id: str, status_code: int) -> None:
         """Finish tracking a request."""
         if request_id in self._requests:
             self._requests[request_id].finish(status_code)
@@ -58,11 +59,11 @@ class MetricsCollector:
             # Clean up completed request
             del self._requests[request_id]
 
-    def record_model_usage(self, model: str):
+    def record_model_usage(self, model: str) -> None:
         """Record usage of a specific model."""
         self._model_usage[model] += 1
 
-    def get_summary(self) -> dict:
+    def get_summary(self) -> Dict[str, Any]:
         """Get a summary of collected metrics."""
         return {
             "total_requests": self._total_requests,
@@ -73,7 +74,7 @@ class MetricsCollector:
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-    def get_request_stats(self) -> dict:
+    def get_request_stats(self) -> Dict[str, Any]:
         """Get statistics about recent requests."""
         if not self._requests:
             return {"average_response_time_ms": 0, "active_requests": 0}
