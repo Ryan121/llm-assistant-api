@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.0 (2026-09-03)
+
+### Features
+
+- Add agent & cli
+  ([`f3220a4`](https://github.com/Ryan121/llm-assistant-api/commit/f3220a40c948d1ed89a0a9492ee536a8e56f3bc1))
+
+
 ## v0.3.0 (2026-09-03)
 
 ### Bug Fixes

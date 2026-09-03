@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-assistant-api"
-version = "0.3.0"
+version = "0.4.0"
 description = "OpenAI-compatible gateway for a self-hosted coding assistant model served by vLLM"
 readme = "README.md"
 requires-python = ">=3.11"
