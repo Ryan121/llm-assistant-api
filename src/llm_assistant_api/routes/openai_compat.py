@@ -15,6 +15,7 @@ from pydantic import BaseModel, ValidationError
 
 from ..config import Settings
 from ..deps import get_http_client, get_settings, require_api_key
+from ..errors import ModelNotFoundError, UpstreamError
 from ..proxy import forward, list_upstream_models, prepare_payload, resolve_target
 
 log = logging.getLogger(__name__)
@@ -84,6 +85,12 @@ async def _handle(
             getattr(request.state, "request_id", "-"),
         )
         return await forward(client, path, prepared, target, stream=streaming)
+    except (HTTPException, UpstreamError, ModelNotFoundError):
+        # These already carry the right status code and are rendered by the
+        # dedicated handlers in main.py. Collapsing them into a 500 below would
+        # turn an unreachable upstream (502/504) or an unknown model (404) into
+        # an opaque "Internal server error" for the editor.
+        raise
     except ValidationError as e:
         log.error("Payload validation error: %s", str(e))
         raise HTTPException(status_code=400, detail=f"Invalid payload: {str(e)}") from e

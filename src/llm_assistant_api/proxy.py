@@ -208,7 +208,7 @@ async def _forward_stream(
             async for chunk in upstream.aiter_raw():
                 yield chunk
         except httpx.HTTPError as exc:  # mid-stream failure: no status left to set
-            log.warning("Stream aborted by upstream: %s", exc)
+            log.warning("stream aborted by upstream: %s", exc)
         finally:
             await upstream.aclose()
 

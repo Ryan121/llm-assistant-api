@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 import time
@@ -37,6 +38,7 @@ def get_http_client(request: Request) -> httpx.AsyncClient:
 
 
 def require_api_key(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
 ) -> None:
@@ -106,9 +108,12 @@ def _get_client_identifier(
     credentials: HTTPAuthorizationCredentials | None, settings: Settings, request: Request
 ) -> str:
     """Get a unique identifier for rate limiting purposes."""
-    # Try to use the API key as identifier if available
+    # Try to use the API key as identifier if available. It is hashed rather
+    # than truncated: this value is logged on every throttle, and a prefix of a
+    # short key is the key itself.
     if credentials and credentials.credentials:
-        return f"key:{credentials.credentials[:16]}"  # Truncate for uniqueness
+        digest = hashlib.sha256(credentials.credentials.encode()).hexdigest()
+        return f"key:{digest[:16]}"
 
     # Fall back to IP address
     forwarded_for = request.headers.get("x-forwarded-for")

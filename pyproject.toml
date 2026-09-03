@@ -66,7 +66,7 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RET", "ASYNC", "S", "T20"]
-ignore = ["S101", "N805", "F821", "B008"]  # Ignore specific ruff errors that are legitimate in this context
+ignore = ["S101", "N805", "B008"]  # Ignore specific ruff errors that are legitimate in this context
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S105", "S106"]

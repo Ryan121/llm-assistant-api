@@ -12,7 +12,7 @@ class RateLimitConfig:
     max_requests: int = 100  # Maximum requests per time window
     window_seconds: int = 60  # Time window in seconds
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.max_requests <= 0:
             raise ValueError("max_requests must be positive")
         if self.window_seconds <= 0:
