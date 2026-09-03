@@ -54,7 +54,7 @@ def require_api_key(
 
     # Rate limiting check
     # Using IP address for rate limiting if available, otherwise token
-    identifier = _get_client_identifier(credentials, settings, request) # noqa
+    identifier = _get_client_identifier(credentials, settings, request)  # noqa
     if not rate_limiter.is_allowed(identifier):
         reset_time = rate_limiter.get_reset_time(identifier)
         log.warning(

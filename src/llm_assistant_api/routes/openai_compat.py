@@ -70,8 +70,7 @@ async def _handle(
 
         requested_model = payload.get("model")
         target = resolve_target(
-            settings, requested_model
-            if isinstance(requested_model, str) else None
+            settings, requested_model if isinstance(requested_model, str) else None
         )
         prepared = prepare_payload(payload, target, settings)
         streaming = bool(prepared.get("stream"))
