@@ -66,19 +66,21 @@ def resolve_target(settings: Settings, requested_model: str | None) -> Target:
     enabled. Everything else goes to the primary model. An unrecognised name
     falls back to the primary model when ``MODEL_ALIAS_FALLBACK`` is on, which
     is what makes editor plugins with hard-coded model names work unchanged.
-    
+
     Args:
         settings: Application settings
         requested_model: The model name requested by the client
-        
+
     Returns:
         Target object specifying where to route the request and which model ID to use
-        
+
     Raises:
         ModelNotFoundError: When model alias fallback is disabled and model is not recognized
     """
     if requested_model and requested_model in settings.autocomplete_aliases:
-        log.debug("Routing request for autocomplete model %r to autocomplete upstream", requested_model)
+        log.debug(
+            "Routing request for autocomplete model %r to autocomplete upstream", requested_model
+        )
         return Target(
             settings.autocomplete_base_url,
             settings.autocomplete_model_id,
@@ -87,9 +89,15 @@ def resolve_target(settings: Settings, requested_model: str | None) -> Target:
 
     if requested_model and requested_model != settings.model_id:
         if not settings.model_alias_fallback:
-            log.warning("Model %r not found in available models: %s", requested_model, settings.served_models())
+            log.warning(
+                "Model %r not found in available models: %s",
+                requested_model,
+                settings.served_models(),
+            )
             raise ModelNotFoundError(requested_model, settings.served_models())
-        log.debug("Aliasing requested model %r to primary model %r", requested_model, settings.model_id)
+        log.debug(
+            "Aliasing requested model %r to primary model %r", requested_model, settings.model_id
+        )
 
     log.debug("Routing request to primary model %r", settings.model_id)
     return Target(settings.upstream_base_url, settings.model_id, settings.upstream_api_key)

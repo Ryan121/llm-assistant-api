@@ -16,8 +16,8 @@ from fastapi import APIRouter, Depends, Response, status
 from .. import __version__
 from ..config import Settings
 from ..deps import get_http_client, get_settings
-from ..proxy import probe_upstream
 from ..metrics import metrics_collector
+from ..proxy import probe_upstream
 
 router = APIRouter(tags=["operations"])
 
@@ -63,5 +63,5 @@ async def metrics() -> dict[str, Any]:
     """Return application performance metrics."""
     return {
         "summary": metrics_collector.get_summary(),
-        "request_stats": metrics_collector.get_request_stats()
+        "request_stats": metrics_collector.get_request_stats(),
     }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hmac
 import logging
-from typing import Optional
+import time
 
 import httpx
 from fastapi import Depends, HTTPException, Request, status
@@ -51,17 +51,17 @@ def require_api_key(
         return
 
     presented = credentials.credentials if credentials else ""
-    
+
     # Rate limiting check
     # Using IP address for rate limiting if available, otherwise token
-    identifier = _get_client_identifier(credentials, request)
+    identifier = _get_client_identifier(credentials, settings, request) # noqa
     if not rate_limiter.is_allowed(identifier):
         reset_time = rate_limiter.get_reset_time(identifier)
         log.warning(
             "rate limited request from %s: exceeded limit of %d requests per %d seconds",
             identifier,
             rate_limiter.config.max_requests,
-            rate_limiter.config.window_seconds
+            rate_limiter.config.window_seconds,
         )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -102,17 +102,19 @@ def require_api_key(
         )
 
 
-def _get_client_identifier(credentials: HTTPAuthorizationCredentials | None, request: Request) -> str:
+def _get_client_identifier(
+    credentials: HTTPAuthorizationCredentials | None, settings: Settings, request: Request
+) -> str:
     """Get a unique identifier for rate limiting purposes."""
     # Try to use the API key as identifier if available
     if credentials and credentials.credentials:
         return f"key:{credentials.credentials[:16]}"  # Truncate for uniqueness
-    
+
     # Fall back to IP address
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
         # Take the first IP in the forwarded-for list
         return f"ip:{forwarded_for.split(',')[0].strip()}"
-    
+
     # Fallback to remote address
     return f"ip:{request.client.host if request.client else 'unknown'}"

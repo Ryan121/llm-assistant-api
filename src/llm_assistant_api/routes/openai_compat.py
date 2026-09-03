@@ -10,7 +10,7 @@ import logging
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Body, Depends, Request, Response, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ValidationError
 
 from ..config import Settings
@@ -63,13 +63,16 @@ async def _handle(
         # Validate payload structure before processing
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Invalid payload format")
-        
+
         # Validate required fields
         if "model" in payload and not isinstance(payload["model"], str):
             raise HTTPException(status_code=400, detail="Invalid model field")
-            
+
         requested_model = payload.get("model")
-        target = resolve_target(settings, requested_model if isinstance(requested_model, str) else None)
+        target = resolve_target(
+            settings, requested_model
+            if isinstance(requested_model, str) else None
+        )
         prepared = prepare_payload(payload, target, settings)
         streaming = bool(prepared.get("stream"))
 
@@ -84,10 +87,10 @@ async def _handle(
         return await forward(client, path, prepared, target, stream=streaming)
     except ValidationError as e:
         log.error("Payload validation error: %s", str(e))
-        raise HTTPException(status_code=400, detail=f"Invalid payload: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Invalid payload: {str(e)}") from e
     except Exception as e:
         log.error("Error handling request to %s: %s", path, str(e), exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from e
 
 
 @router.post("/chat/completions", summary="Chat completions (streaming and blocking)")
