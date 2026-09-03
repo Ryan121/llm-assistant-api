@@ -1,7 +1,7 @@
 # llm-assistant-api
 
 A self-hosted coding assistant for **2× RTX A6000**, deployed in one command
-and driven from VS Code.
+and driven from VS Code & the CLI
 
 [![CI](https://github.com/Ryan121/llm-assistant-api/actions/workflows/ci.yml/badge.svg)](https://github.com/Ryan121/llm-assistant-api/actions/workflows/ci.yml)
 [![Release](https://github.com/Ryan121/llm-assistant-api/actions/workflows/release.yml/badge.svg)](https://github.com/Ryan121/llm-assistant-api/actions/workflows/release.yml)
