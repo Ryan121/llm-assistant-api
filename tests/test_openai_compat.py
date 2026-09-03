@@ -16,10 +16,10 @@ from tests.conftest import (
     make_settings,
 )
 
-CHAT_URL = "http://vllm.test:8000/v1/chat/completions"
-COMPLETIONS_URL = "http://vllm.test:8000/v1/completions"
-MODELS_URL = "http://vllm.test:8000/v1/models"
-FIM_COMPLETIONS_URL = "http://fim.test:8000/v1/completions"
+CHAT_URL = "http://vllm.test:8999/v1/chat/completions"
+COMPLETIONS_URL = "http://vllm.test:8999/v1/completions"
+MODELS_URL = "http://vllm.test:8999/v1/models"
+FIM_COMPLETIONS_URL = "http://fim.test:8999/v1/completions"
 
 CHAT_REQUEST = {"model": PRIMARY_MODEL, "messages": [{"role": "user", "content": "hi"}]}
 CHAT_REPLY = {

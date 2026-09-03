@@ -33,13 +33,13 @@ class Settings(BaseSettings):
     cors_origins: str = ""
 
     # --- primary upstream (chat / edit / agent) ---------------------------
-    upstream_base_url: str = "http://vllm:8000/v1"
+    upstream_base_url: str = "http://vllm:8999/v1"
     upstream_api_key: str = ""
     model_id: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 
     # --- optional secondary upstream (fill-in-the-middle autocomplete) ----
     autocomplete_enabled: bool = False
-    autocomplete_base_url: str = "http://vllm-autocomplete:8000/v1"
+    autocomplete_base_url: str = "http://vllm-autocomplete:8999/v1"
     autocomplete_model_id: str = "Qwen/Qwen2.5-Coder-1.5B"
 
     # --- client access ----------------------------------------------------

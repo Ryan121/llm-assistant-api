@@ -7,7 +7,7 @@ import pytest
 
 from tests.conftest import FakeUpstream, GatewayFactory, make_settings
 
-CHAT_URL = "http://vllm.test:8000/v1/chat/completions"
+CHAT_URL = "http://vllm.test:8999/v1/chat/completions"
 CHAT_REQUEST = {"model": "anything", "messages": [{"role": "user", "content": "hi"}]}
 
 

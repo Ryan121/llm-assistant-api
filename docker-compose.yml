@@ -66,7 +66,7 @@ services:
       --model ${MODEL_ID:?MODEL_ID must be set - run `make env` first}
       --served-model-name ${MODEL_ID}
       --host 0.0.0.0
-      --port 8000
+      --port 8999
       --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-2}
       --pipeline-parallel-size ${PIPELINE_PARALLEL_SIZE:-1}
       --max-model-len ${MAX_MODEL_LEN:-131072}
@@ -77,7 +77,7 @@ services:
       ${VLLM_EXTRA_ARGS:-}
     healthcheck:
       test:
-        ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+        ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8999/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -102,14 +102,14 @@ services:
       --model ${AUTOCOMPLETE_MODEL_ID:-Qwen/Qwen2.5-Coder-1.5B}
       --served-model-name ${AUTOCOMPLETE_MODEL_ID:-Qwen/Qwen2.5-Coder-1.5B}
       --host 0.0.0.0
-      --port 8000
+      --port 8999
       --tensor-parallel-size 1
       --max-model-len ${AUTOCOMPLETE_MAX_MODEL_LEN:-8192}
       --gpu-memory-utilization ${AUTOCOMPLETE_GPU_MEMORY_UTILIZATION:-0.08}
       --dtype ${VLLM_DTYPE:-bfloat16}
     healthcheck:
       test:
-        ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+        ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8999/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -134,10 +134,10 @@ services:
       - "${API_PORT:-8080}:8080"
     environment:
       MODEL_ID: ${MODEL_ID}
-      UPSTREAM_BASE_URL: http://vllm:8000/v1
+      UPSTREAM_BASE_URL: http://vllm:8999/v1
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-}
       AUTOCOMPLETE_ENABLED: ${AUTOCOMPLETE_ENABLED:-false}
-      AUTOCOMPLETE_BASE_URL: http://vllm-autocomplete:8000/v1
+      AUTOCOMPLETE_BASE_URL: http://vllm-autocomplete:8999/v1
       AUTOCOMPLETE_MODEL_ID: ${AUTOCOMPLETE_MODEL_ID:-Qwen/Qwen2.5-Coder-1.5B}
       API_KEYS: ${API_KEYS:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

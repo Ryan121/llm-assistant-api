@@ -12,8 +12,8 @@ from tests.conftest import (
     make_settings,
 )
 
-HEALTH_URL = "http://vllm.test:8000/health"
-FIM_HEALTH_URL = "http://fim.test:8000/health"
+HEALTH_URL = "http://vllm.test:8999/health"
+FIM_HEALTH_URL = "http://fim.test:8999/health"
 
 
 async def test_healthz_does_not_touch_the_model_server(

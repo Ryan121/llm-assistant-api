@@ -16,10 +16,10 @@ from tests.conftest import (
 
 
 def test_target_builds_urls_without_double_slashes() -> None:
-    target = Target("http://vllm:8000/v1/", PRIMARY_MODEL, "")
+    target = Target("http://vllm:8999/v1/", PRIMARY_MODEL, "")
 
-    assert target.url("/chat/completions") == "http://vllm:8000/v1/chat/completions"
-    assert target.url("models") == "http://vllm:8000/v1/models"
+    assert target.url("/chat/completions") == "http://vllm:8999/v1/chat/completions"
+    assert target.url("models") == "http://vllm:8999/v1/models"
 
 
 def test_target_omits_authorization_when_no_upstream_key() -> None:

@@ -267,7 +267,7 @@ ansible-lint: ## Lint the playbooks (requires ansible-lint)
 
 .PHONY: run-local
 run-local: ## Run the gateway on the host against an already-running vLLM
-	@UPSTREAM_BASE_URL=http://127.0.0.1:8000/v1 \
+	@UPSTREAM_BASE_URL=http://127.0.0.1:8999/v1 \
 	  $(PY) -m uvicorn llm_assistant_api.main:app --reload --port $(API_PORT)
 
 .PHONY: clean

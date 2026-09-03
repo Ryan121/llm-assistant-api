@@ -23,8 +23,8 @@ from pydantic_settings import SettingsConfigDict
 from llm_assistant_api.config import Settings
 from llm_assistant_api.main import create_app
 
-UPSTREAM = "http://vllm.test:8000/v1"
-AUTOCOMPLETE_UPSTREAM = "http://fim.test:8000/v1"
+UPSTREAM = "http://vllm.test:8999/v1"
+AUTOCOMPLETE_UPSTREAM = "http://fim.test:8999/v1"
 PRIMARY_MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 FIM_MODEL = "Qwen/Qwen2.5-Coder-1.5B"
 
