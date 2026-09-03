@@ -1,6 +1,38 @@
 # CHANGELOG
 
 
+## v0.3.0 (2026-09-03)
+
+### Bug Fixes
+
+- Files ruff formatted
+  ([`f3844d3`](https://github.com/Ryan121/llm-assistant-api/commit/f3844d3495b4509c532dfd14899bb98963669ece))
+
+- Further fixes
+  ([`fc1736b`](https://github.com/Ryan121/llm-assistant-api/commit/fc1736b4c9e4fd1238d306d564cafb1c5899f295))
+
+- Further fixes
+  ([`8177127`](https://github.com/Ryan121/llm-assistant-api/commit/8177127d37309e84f4c76811da5bf48e8924093c))
+
+- Resolve CI failures
+  ([`d343b77`](https://github.com/Ryan121/llm-assistant-api/commit/d343b775a7861137e6764c9f2a8ed76275ec6190))
+
+- Resolve lint issues and broken tests
+  ([`b25bc3b`](https://github.com/Ryan121/llm-assistant-api/commit/b25bc3b0d5850a5f2eccf503227aaca74b770253))
+
+- Resolve mypy issues
+  ([`783d6c7`](https://github.com/Ryan121/llm-assistant-api/commit/783d6c7ed48d57076bb719493216753e0fa6a34e))
+
+- Resolve ruff errors
+  ([`98ca831`](https://github.com/Ryan121/llm-assistant-api/commit/98ca831aea2679272c6e041a96c7b5390b0f1e42))
+
+### Features
+
+- Revise port allocations & add metrics normaliser, rate limiting& other hardening. Also tweak env
+  vars
+  ([`879df28`](https://github.com/Ryan121/llm-assistant-api/commit/879df28db1340e42188df5bb2a089cadec2760d7))
+
+
 ## v0.2.2 (2026-09-03)
 
 ### Bug Fixes
