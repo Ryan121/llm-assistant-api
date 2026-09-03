@@ -55,9 +55,7 @@ def test_structure_repairs_still_run_when_tool_argument_normalisation_is_disable
 
     assert normalized["messages"][0]["content"] == "read it"
     assert isinstance(normalized["messages"][1]["tool_calls"], list)
-    assert normalized["messages"][1]["tool_calls"][0]["function"]["arguments"] == {
-        "path": "a.py"
-    }
+    assert normalized["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"path": "a.py"}
     assert any("content object unwrapped" in note for note in notes)
     assert any("single tool_calls object wrapped" in note for note in notes)
     assert not any("object encoded to a JSON string" in note for note in notes)

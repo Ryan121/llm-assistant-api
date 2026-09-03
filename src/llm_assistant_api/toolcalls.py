@@ -117,7 +117,9 @@ def _normalize_message(message: Any, *, normalize_empty: bool = True) -> tuple[A
             continue
 
         name = function.get("name") or "<unnamed>"
-        value, reason = _normalize_value(function["arguments"], name, normalize_empty=normalize_empty)
+        value, reason = _normalize_value(
+            function["arguments"], name, normalize_empty=normalize_empty
+        )
         if reason is None:
             rebuilt.append(call)
             continue
