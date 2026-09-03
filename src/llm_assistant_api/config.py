@@ -8,7 +8,7 @@ the environment, which is hostile in a ``.env`` file.
 
 from __future__ import annotations
 
-from pydantic import validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -78,27 +78,31 @@ class Settings(BaseSettings):
             models.append(self.autocomplete_model_id)
         return models
 
-    # Validation methods - these are pydantic validators that expect 'cls' as first param
-    @validator("request_timeout_seconds")
-    def validate_request_timeout(self, v):
+    # Validation methods - using Pydantic V2 field_validator syntax
+    @field_validator("request_timeout_seconds")
+    @classmethod
+    def validate_request_timeout(cls, v):
         if v <= 0:
             raise ValueError("request_timeout_seconds must be positive")
         return v
 
-    @validator("connect_timeout_seconds")
-    def validate_connect_timeout(self, v):
+    @field_validator("connect_timeout_seconds")
+    @classmethod
+    def validate_connect_timeout(cls, v):
         if v <= 0:
             raise ValueError("connect_timeout_seconds must be positive")
         return v
 
-    @validator("max_connections")
-    def validate_max_connections(self, v):
+    @field_validator("max_connections")
+    @classmethod
+    def validate_max_connections(cls, v):
         if v <= 0:
             raise ValueError("max_connections must be positive")
         return v
 
-    @validator("max_tokens_cap")
-    def validate_max_tokens_cap(self, v):
+    @field_validator("max_tokens_cap")
+    @classmethod
+    def validate_max_tokens_cap(cls, v):
         if v < 0:
             raise ValueError("max_tokens_cap must be non-negative")
         return v
