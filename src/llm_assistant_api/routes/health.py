@@ -12,10 +12,12 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, Response, status
+from fastapi.responses import PlainTextResponse
 
 from .. import __version__
 from ..config import Settings
 from ..deps import get_http_client, get_settings
+from ..errors import UpstreamError
 from ..metrics import metrics_collector
 from ..proxy import probe_upstream
 
@@ -58,10 +60,45 @@ async def version(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     }
 
 
-@router.get("/metrics", summary="Get application metrics")
-async def metrics() -> dict[str, Any]:
-    """Return application performance metrics."""
+@router.get("/metrics", summary="Gateway metrics (JSON, or Prometheus with ?format=prometheus)")
+async def metrics(response: Response, format: str = "json") -> Any:
+    """Return gateway performance metrics.
+
+    JSON by default because the common case is a human running ``curl``;
+    ``?format=prometheus`` for a scraper.
+    """
+    if format == "prometheus":
+        return PlainTextResponse(
+            metrics_collector.render_prometheus(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
     return {
         "summary": metrics_collector.get_summary(),
         "request_stats": metrics_collector.get_request_stats(),
     }
+
+
+@router.get("/metrics/upstream", summary="Proxy the model server's own Prometheus metrics")
+async def upstream_metrics(
+    settings: Settings = Depends(get_settings),
+    client: httpx.AsyncClient = Depends(get_http_client),
+) -> Response:
+    """Relay vLLM's ``/metrics``.
+
+    The two numbers that decide almost every tuning question live here and
+    nowhere else: KV-cache utilisation (are you out of room, or out of
+    compute?) and preemption count (is the scheduler thrashing?). vLLM serves
+    them at the server root, one level above ``/v1``.
+    """
+    root = settings.upstream_base_url.rstrip("/").removesuffix("/v1")
+    try:
+        upstream = await client.get(f"{root}/metrics", timeout=10.0)
+    except httpx.HTTPError as exc:
+        raise UpstreamError(f"Cannot reach model server metrics at {root}: {exc}") from exc
+
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type", "text/plain"),
+    )

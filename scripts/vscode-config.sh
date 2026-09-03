@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Emit ready-to-paste VS Code configuration for the running gateway.
+# Emit ready-to-paste editor configuration for the running gateway.
 #
-#   scripts/vscode-config.sh            # print config for every supported extension
+#   scripts/vscode-config.sh            # print config for every supported client
 #   scripts/vscode-config.sh --install  # also write ~/.continue/config.yaml
+#
+# Cline leads because Continue was acquired by Cursor in June 2026 and archived:
+# the extension still installs and runs fully offline against this gateway, but
+# it is no longer maintained, so it is documented as a fallback rather than the
+# recommended path. Roo Code was archived in May 2026 and is gone from here.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
@@ -23,8 +28,47 @@ FIM_ON="$(env_get AUTOCOMPLETE_ENABLED false)"
 HOST="${GATEWAY_HOST:-127.0.0.1}"
 BASE="http://${HOST}:${PORT}/v1"
 
-# Short label the editor shows in its model picker.
 SHORT_NAME="${MODEL##*/}"
+
+# --- the agent that ships with this repo -----------------------------------
+
+step "assist -- the CLI in this repo (agentic sessions, no extension needed)"
+info "make venv        # once, to install it"
+info "assist           # in any git repository"
+dim  "Edits land uncommitted in the working tree, so you review them in VS Code's"
+dim  "Source Control panel or with 'git diff'. See docs/AGENT.md."
+
+# --- Cline ------------------------------------------------------------------
+
+step "Cline -- RECOMMENDED extension (chat + agentic file editing + terminal)"
+info "Install with:  code --install-extension saoudrizwan.claude-dev"
+info "API Provider ......... OpenAI Compatible"
+info "Base URL ............. ${BASE}"
+info "API Key .............. ${KEY}"
+info "Model ID ............. ${MODEL}"
+info "Context window ....... $(env_get MAX_MODEL_LEN 131072)"
+dim  "Turn image support OFF (this is a text-only coding model) and make sure"
+dim  "function/tool calling is ON, or agent mode silently never calls a tool."
+
+step "Kilo Code -- same setup, if you want MIT licensing and per-mode models"
+info "API Provider 'OpenAI Compatible', same four values as above."
+
+# --- autocomplete -----------------------------------------------------------
+
+step "Inline autocomplete"
+if [[ "$FIM_ON" == "true" ]]; then
+  info "Serving ${FIM_MODEL} at ${BASE} for fill-in-the-middle."
+  info "Point Twinny (or any FIM client) at:"
+  info "  Base URL ........... ${BASE}"
+  info "  Model .............. ${FIM_MODEL}"
+  info "  Endpoint ........... /completions   (NOT /chat/completions)"
+  dim  "No extension in the Cline family does inline completion - it needs its own."
+else
+  warn "AUTOCOMPLETE_ENABLED=false, so there is no completion model running."
+  dim  "Enable it in .env, then: make up PROFILES=\"--profile autocomplete\""
+fi
+
+# --- Continue (unmaintained) ------------------------------------------------
 
 OUT="$REPO_ROOT/vscode/continue-config.generated.yaml"
 mkdir -p "$REPO_ROOT/vscode"
@@ -63,12 +107,14 @@ mkdir -p "$REPO_ROOT/vscode"
   echo "  - provider: codebase"
 } >"$OUT"
 
-step "Continue -- RECOMMENDED (chat + edit + agent + autocomplete, no account needed)"
+step "Continue -- UNMAINTAINED (acquired by Cursor, June 2026; final release v2.0.0)"
+dim "Still works offline against this gateway, and is the only single config"
+dim "covering chat and autocomplete together. Written to:"
 dim "$OUT"
 sed 's/^/    /' "$OUT"
 echo
-info "Install it with:  code --install-extension Continue.continue"
-info "Then:             make vscode-install"
+info "Install with:  code --install-extension Continue.continue"
+info "Then:          make vscode-install"
 
 if $INSTALL; then
   target="$HOME/.continue/config.yaml"
@@ -82,12 +128,7 @@ if $INSTALL; then
   ok "installed to $target - reload VS Code to pick it up"
 fi
 
-step "Cline / Roo Code / Kilo Code"
-info "API Provider ......... OpenAI Compatible"
-info "Base URL ............. ${BASE}"
-info "API Key .............. ${KEY}"
-info "Model ID ............. ${MODEL}"
-dim  "Tick 'supports images' off, and enable function/tool calling."
+# --- everything else --------------------------------------------------------
 
 step "Built-in VS Code chat -- only worth it if you already have Copilot"
 info "Chat -> model picker -> Manage Models -> OpenAI Compatible"
@@ -96,7 +137,7 @@ dim  "No model picker? It belongs to the GitHub Copilot Chat extension, not to"
 dim  "VS Code. Requires that extension plus a signed-in Copilot entitlement,"
 dim  "and it replaces the chat model only - completions stay with GitHub."
 
-step "Zed / any OpenAI SDK client"
+step "Zed / Aider / any OpenAI SDK client"
 info "OPENAI_BASE_URL=${BASE}"
 info "OPENAI_API_KEY=${KEY}"
 

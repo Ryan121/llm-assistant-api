@@ -195,6 +195,16 @@ health: ## Show gateway liveness and readiness
 smoke: ## End-to-end check: auth, completion, streaming, tool calling
 	@scripts/smoke-test.sh
 
+.PHONY: bench
+bench: ## Load test: TTFT, inter-token latency and throughput under concurrency
+	@scripts/bench.sh
+
+.PHONY: metrics
+metrics: ## Gateway latency percentiles, then the engine's KV-cache and queue stats
+	@curl -fsS http://127.0.0.1:$(API_PORT)/metrics && echo
+	@curl -fsS http://127.0.0.1:$(API_PORT)/metrics/upstream \
+	  | grep -E 'vllm:(num_requests|gpu_cache_usage|num_preemptions)' || true
+
 .PHONY: logs
 logs: ## Follow all logs
 	@$(COMPOSE) logs -f --tail 100

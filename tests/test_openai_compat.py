@@ -447,7 +447,7 @@ async def test_mid_stream_upstream_death_ends_the_stream_without_a_traceback(
 
 
 async def test_unknown_path_uses_the_openai_error_envelope(client: httpx.AsyncClient) -> None:
-    response = await client.get("/v1/embeddings")
+    response = await client.get("/v1/moderations")
 
     assert response.status_code == 404
     assert response.json()["error"]["type"] == "invalid_request_error"

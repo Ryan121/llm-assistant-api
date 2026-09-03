@@ -37,3 +37,21 @@ class ModelNotFoundError(Exception):
         super().__init__(model)
         self.model = model
         self.available = available
+
+
+class ContextOverflowError(Exception):
+    """The request will not fit in the engine's context window."""
+
+    def __init__(self, estimated_tokens: int, budget: int) -> None:
+        super().__init__(estimated_tokens)
+        self.estimated_tokens = estimated_tokens
+        self.budget = budget
+
+
+class RouteDisabledError(Exception):
+    """A route was called whose upstream is not configured on this deployment."""
+
+    def __init__(self, route: str, setting: str) -> None:
+        super().__init__(route)
+        self.route = route
+        self.setting = setting

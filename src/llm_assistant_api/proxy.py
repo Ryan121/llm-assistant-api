@@ -17,7 +17,8 @@ from fastapi import Response
 from fastapi.responses import StreamingResponse
 
 from .config import Settings
-from .errors import ModelNotFoundError, UpstreamError
+from .context import guard_context
+from .errors import ModelNotFoundError, RouteDisabledError, UpstreamError
 from .payload import normalize_inbound_payload
 
 log = logging.getLogger(__name__)
@@ -40,14 +41,29 @@ _HOP_BY_HOP = frozenset(
 
 
 class Target:
-    """Where a request should go, and under which name."""
+    """Where a request should go, under which name, and on what budget."""
 
-    __slots__ = ("base_url", "model_id", "api_key")
+    __slots__ = ("base_url", "model_id", "api_key", "timeout", "priority")
 
-    def __init__(self, base_url: str, model_id: str, api_key: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model_id: str,
+        api_key: str,
+        *,
+        timeout: float | None = None,
+        priority: int | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model_id = model_id
         self.api_key = api_key
+        #: Per-route read timeout. ``None`` keeps the client-wide default,
+        #: which is sized for a long agent turn.
+        self.timeout = timeout
+        #: vLLM scheduling priority; lower is served earlier. ``None`` omits
+        #: the field, which is required unless the engine runs with
+        #: ``--scheduling-policy priority``.
+        self.priority = priority
 
     def url(self, path: str) -> str:
         return f"{self.base_url}/{path.lstrip('/')}"
@@ -85,6 +101,12 @@ def resolve_target(settings: Settings, requested_model: str | None) -> Target:
             settings.autocomplete_base_url,
             settings.autocomplete_model_id,
             settings.upstream_api_key,
+            # A completion the user has already typed past is worthless, so it
+            # gets a short leash and jumps the queue ahead of agent traffic.
+            timeout=settings.autocomplete_timeout_seconds,
+            priority=(
+                settings.autocomplete_priority if settings.priority_routing_enabled else None
+            ),
         )
 
     if requested_model and requested_model != settings.model_id:
@@ -100,7 +122,36 @@ def resolve_target(settings: Settings, requested_model: str | None) -> Target:
         )
 
     log.debug("Routing request to primary model %r", settings.model_id)
-    return Target(settings.upstream_base_url, settings.model_id, settings.upstream_api_key)
+    return Target(
+        settings.upstream_base_url,
+        settings.model_id,
+        settings.upstream_api_key,
+        priority=settings.chat_priority if settings.priority_routing_enabled else None,
+    )
+
+
+def resolve_embeddings_target(settings: Settings) -> Target:
+    """Upstream for ``/v1/embeddings``. Raises when the service is not deployed."""
+    if not settings.embeddings_enabled:
+        raise RouteDisabledError("/v1/embeddings", "EMBEDDINGS_ENABLED")
+    return Target(
+        settings.embeddings_base_url,
+        settings.embeddings_model_id,
+        settings.upstream_api_key,
+        timeout=settings.embeddings_timeout_seconds,
+    )
+
+
+def resolve_rerank_target(settings: Settings) -> Target:
+    """Upstream for ``/v1/rerank``. Raises when the service is not deployed."""
+    if not settings.rerank_enabled:
+        raise RouteDisabledError("/v1/rerank", "RERANK_ENABLED")
+    return Target(
+        settings.rerank_base_url,
+        settings.rerank_model_id,
+        settings.upstream_api_key,
+        timeout=settings.embeddings_timeout_seconds,
+    )
 
 
 def prepare_payload(payload: dict[str, Any], target: Target, settings: Settings) -> dict[str, Any]:
@@ -128,12 +179,31 @@ def prepare_payload(payload: dict[str, Any], target: Target, settings: Settings)
             prepared["max_tokens"] = cap
             log.debug("Applied default token cap of %d to max_tokens", cap)
 
+    # Never override a priority the caller set deliberately.
+    if target.priority is not None and "priority" not in prepared:
+        prepared["priority"] = target.priority
+
+    # Last, so the estimate accounts for the cap we just applied.
+    estimated = guard_context(
+        prepared,
+        budget=settings.context_budget,
+        chars_per_token=settings.chars_per_token,
+    )
+    log.debug("Estimated prompt size: ~%d tokens", estimated)
+
     return prepared
 
 
 def _passthrough_headers(upstream: httpx.Response) -> dict[str, str]:
     """Filter out hop-by-hop headers that shouldn't be forwarded to the client."""
     return {k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP}
+
+
+def _timeout_kwarg(target: Target) -> dict[str, Any]:
+    """``timeout=`` for httpx, or nothing so the client-wide default applies."""
+    if target.timeout is None:
+        return {}
+    return {"timeout": target.timeout}
 
 
 async def forward(
@@ -156,7 +226,12 @@ async def _forward_json(
 ) -> Response:
     try:
         log.debug("Making JSON request to %s", target.url(path))
-        upstream = await client.post(target.url(path), json=payload, headers=target.headers())
+        upstream = await client.post(
+            target.url(path),
+            json=payload,
+            headers=target.headers(),
+            **_timeout_kwarg(target),
+        )
         log.debug("Received JSON response with status %d", upstream.status_code)
     except httpx.TimeoutException as exc:
         log.error("Upstream timeout when connecting to %s: %s", target.base_url, exc)
@@ -182,7 +257,13 @@ async def _forward_stream(
     editor would see an empty 200.
     """
     log.debug("Opening streaming request to %s", target.url(path))
-    request = client.build_request("POST", target.url(path), json=payload, headers=target.headers())
+    request = client.build_request(
+        "POST",
+        target.url(path),
+        json=payload,
+        headers=target.headers(),
+        **_timeout_kwarg(target),
+    )
     try:
         upstream = await client.send(request, stream=True)
         log.debug("Received streaming response with status %d", upstream.status_code)

@@ -1,11 +1,26 @@
-# Connecting VS Code
+# Connecting an editor
 
-**Use Continue.** It is the documented path here, and the rest of this page
-explains why the alternatives are worse for a self-hosted model.
+The gateway speaks the OpenAI API, so anything that takes a custom base URL
+works. What changed in 2026 is which of those things still has a maintainer:
 
-The gateway speaks the OpenAI API, so anything that accepts a custom base URL
-will work — but Continue is the only option that needs no third-party account,
-covers chat *and* autocomplete, and can be configured for you from `.env`.
+| | |
+| --- | --- |
+| **Continue** | Acquired by Cursor, June 2026. Final release `v2.0.0-vscode`, repo read-only. Still installs and runs offline against this gateway; no longer maintained. |
+| **Roo Code** | Archived, May 2026. |
+| **Cline** | Active. The recommended extension here. |
+| **Kilo Code** | Active, MIT, Cline descendant. Good hedge. |
+
+No single extension now covers everything Continue did, so split the roles:
+
+| Job | Use |
+| --- | --- |
+| Agentic sessions | [`assist`](AGENT.md), the CLI in this repo — or Cline |
+| Chat, inline edit | Cline |
+| Inline autocomplete | Twinny or Tabby against `/v1/completions` |
+
+The autocomplete gap is real: nothing in the Cline family does inline
+completion, which makes the `AUTOCOMPLETE_ENABLED` upstream more useful than
+it was, not less.
 
 ## Step 0 — get your values
 
@@ -54,9 +69,79 @@ curl -s -H 'Authorization: Bearer sk-local-...' http://127.0.0.1:8081/v1/models
 
 ---
 
-## Continue — the recommended path
+## Cline — the recommended extension
 
-One config covers chat, inline edit, apply, agent mode and autocomplete.
+```bash
+code --install-extension saoudrizwan.claude-dev
+```
+
+Then in its settings:
+
+| | |
+| --- | --- |
+| API Provider | `OpenAI Compatible` |
+| Base URL | `http://127.0.0.1:8081/v1` |
+| API Key | first entry of `API_KEYS` |
+| Model ID | your `MODEL_ID` |
+| Context window | your `MAX_MODEL_LEN` |
+
+Turn image support **off** — this is a text-only coding model — and make sure
+function/tool calling is **on**, or agent mode silently never calls a tool.
+
+Cline sends a large fixed system prompt, which would normally be expensive.
+This deployment runs `--enable-prefix-caching`, so after the first request that
+prefix is nearly free. Qwen3-Coder was also trained against Cline's agent
+format, which is the same reason `--tool-call-parser qwen3_coder` is the right
+setting here.
+
+**Kilo Code** is configured identically and is worth preferring if you want MIT
+licensing or per-mode model selection.
+
+## `assist` — the agent CLI in this repo
+
+No extension, no third-party dependency, and it ships with the gateway:
+
+```bash
+make venv
+assist            # in any git repository
+```
+
+Edits land uncommitted in the working tree, so you review them in VS Code's
+Source Control panel. Full documentation: **[docs/AGENT.md](AGENT.md)**.
+
+## Inline autocomplete
+
+Nothing in the Cline family does inline completion. Enable the small FIM model
+and point a dedicated extension at it:
+
+```bash
+# .env
+AUTOCOMPLETE_ENABLED=true
+make up PROFILES="--profile autocomplete"
+```
+
+| | |
+| --- | --- |
+| Base URL | `http://127.0.0.1:8081/v1` |
+| Model | your `AUTOCOMPLETE_MODEL_ID` |
+| Endpoint | `/completions` — **not** `/chat/completions` |
+
+**Twinny** is the closest drop-in. **Tabby** is more capable but wants to be
+its own server, so it sits beside this stack rather than behind the gateway.
+
+Autocomplete traffic gets its own short timeout
+(`AUTOCOMPLETE_TIMEOUT_SECONDS`, default 5s) so a keystroke you have already
+typed past cannot hold a KV-cache slot for fifteen minutes. If you also set
+`--scheduling-policy priority` in `VLLM_EXTRA_ARGS` and
+`PRIORITY_ROUTING_ENABLED=true`, completions jump the queue ahead of long agent
+runs.
+
+## Continue — still works, no longer maintained
+
+One config covers chat, inline edit, apply, agent mode and autocomplete, which
+is still unmatched. It is Apache 2.0 and runs entirely offline against this
+gateway — it never needed Continue's cloud for a local model. Use it if that
+single-config convenience outweighs an unmaintained extension.
 
 ```bash
 code --install-extension Continue.continue
@@ -102,19 +187,6 @@ Two fields matter more than they look:
 If `AUTOCOMPLETE_ENABLED=true`, the generated config gains a second entry with
 `roles: [autocomplete]` and `useLegacyCompletionsEndpoint: true` — inline
 completion needs `/v1/completions`, not `/v1/chat/completions`.
-
-## Cline / Roo Code / Kilo Code
-
-Worth adding *alongside* Continue if you want heavier autonomy — "describe a
-change, let it edit files and run commands". No account needed either.
-
-1. Install the extension, open its settings.
-2. **API Provider** → `OpenAI Compatible`
-3. **Base URL** → `http://127.0.0.1:8081/v1`
-4. **API Key** → your `API_KEYS` value
-5. **Model ID** → your `MODEL_ID` value
-6. Leave image support **off** (these are text-only coding models) and make
-   sure function/tool calling is **on**.
 
 ## The built-in VS Code chat — only if you already have Copilot
 
@@ -182,7 +254,7 @@ would rather catch misconfigured clients loudly.
 ## Troubleshooting
 
 **No model picker in the chat view.** That is Copilot Chat, not VS Code — see
-the section above. Use Continue instead.
+the section above. Use Cline instead.
 
 **"Connection refused" / nothing happens.**
 
@@ -209,7 +281,7 @@ so editing `.env` without recreating the container leaves it on the old value.
 
 Otherwise the key must be the *first* comma-separated entry of `API_KEYS`,
 verbatim — re-run `make vscode-config`, then **reload the VS Code window**,
-because Continue caches its config.
+because extensions cache their configuration.
 
 **Chat works, agent mode does nothing.** The tool-call parser does not match
 the model family. Check it:
@@ -220,8 +292,8 @@ make smoke      # fails explicitly if no tool_calls come back
 
 Then fix `VLLM_TOOL_ARGS` per the table in
 [MODEL_SELECTION.md](MODEL_SELECTION.md#match-the-tool-call-parser-to-the-model-family)
-and `make restart`. In Continue, also confirm `capabilities: [tool_use]` is
-present on the model entry.
+and `make restart`. In Cline, confirm function/tool calling is enabled for the
+provider; in Continue, that `capabilities: [tool_use]` is on the model entry.
 
 **First request takes minutes, then works.** The model is still loading.
 
@@ -231,7 +303,12 @@ make wait       # blocks with progress until /readyz goes green
 
 **Requests fail once the context gets long.** The editor is sending more tokens
 than `MAX_MODEL_LEN`. Either raise it (and accept fewer concurrent requests) or
-lower `contextLength` in the extension.
+lower the context window configured in the extension.
+
+Set `CONTEXT_GUARD_TOKENS` to the same value as `MAX_MODEL_LEN` and the gateway
+rejects those requests itself, with a message naming the budget and the code
+`context_length_exceeded` — which agent clients recognise and respond to by
+compacting their transcript, instead of dying on an opaque engine error.
 
 **Timeouts on big agent runs.** Raise `REQUEST_TIMEOUT_SECONDS` in `.env`,
 then `make restart-api`. It only rebuilds the gateway, so the model stays

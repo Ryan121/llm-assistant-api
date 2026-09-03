@@ -15,7 +15,8 @@ from pydantic import BaseModel, ValidationError
 
 from ..config import Settings
 from ..deps import get_http_client, get_settings, require_api_key
-from ..errors import ModelNotFoundError, UpstreamError
+from ..errors import ContextOverflowError, ModelNotFoundError, UpstreamError
+from ..metrics import metrics_collector
 from ..proxy import forward, list_upstream_models, prepare_payload, resolve_target
 
 log = logging.getLogger(__name__)
@@ -76,6 +77,10 @@ async def _handle(
         prepared = prepare_payload(payload, target, settings)
         streaming = bool(prepared.get("stream"))
 
+        # The middleware cannot see this: the model lives in the JSON body,
+        # and reading the body there would consume the request stream.
+        metrics_collector.record_model_usage(target.model_id)
+
         log.info(
             "forward %s model=%s->%s stream=%s rid=%s",
             path,
@@ -85,11 +90,13 @@ async def _handle(
             getattr(request.state, "request_id", "-"),
         )
         return await forward(client, path, prepared, target, stream=streaming)
-    except (HTTPException, UpstreamError, ModelNotFoundError):
+    except (HTTPException, UpstreamError, ModelNotFoundError, ContextOverflowError):
         # These already carry the right status code and are rendered by the
         # dedicated handlers in main.py. Collapsing them into a 500 below would
-        # turn an unreachable upstream (502/504) or an unknown model (404) into
-        # an opaque "Internal server error" for the editor.
+        # turn an unreachable upstream (502/504), an unknown model (404) or an
+        # over-long conversation (400) into an opaque "Internal server error"
+        # for the editor - and the context one in particular is the difference
+        # between an agent that can recover and one that just dies.
         raise
     except ValidationError as e:
         log.error("Payload validation error: %s", str(e))

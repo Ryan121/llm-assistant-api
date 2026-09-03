@@ -22,10 +22,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import __version__
 from .config import Settings
-from .errors import ModelNotFoundError, UpstreamError, error_body, error_response
+from .errors import (
+    ContextOverflowError,
+    ModelNotFoundError,
+    RouteDisabledError,
+    UpstreamError,
+    error_body,
+    error_response,
+)
 from .logging_config import configure_logging
 from .metrics import metrics_collector
-from .routes import health, openai_compat
+from .routes import health, openai_compat, retrieval
 
 log = logging.getLogger(__name__)
 
@@ -107,27 +114,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         metrics = metrics_collector.start_request(request_id, endpoint, model, streamed)
 
-        try:
-            response = await call_next(request)
-            metrics.finish(response.status_code)
-            metrics_collector.finish_request(request_id, response.status_code)
-
+        def complete(status_code: int) -> None:
+            metrics.finish(status_code)
+            metrics_collector.finish_request(request_id, status_code)
             elapsed_ms = (time.perf_counter() - started) * 1000
-            response.headers["x-request-id"] = request_id
+            ttft = f" ttft={metrics.ttft_ms:.0f}ms" if metrics.ttft_ms is not None else ""
             log.info(
-                "%s %s -> %d in %.0fms rid=%s",
+                "%s %s -> %d in %.0fms%s rid=%s",
                 request.method,
                 request.url.path,
-                response.status_code,
+                status_code,
                 elapsed_ms,
+                ttft,
                 request_id,
             )
-            return response
+
+        try:
+            response = await call_next(request)
         except Exception:
             # Ensure cleanup even on exceptions
-            metrics.finish(500)
-            metrics_collector.finish_request(request_id, 500)
+            complete(500)
             raise
+
+        response.headers["x-request-id"] = request_id
+
+        # Stopping the clock here would time the response *headers*. For a
+        # streamed completion those arrive before the model has produced a
+        # single token, so the interesting numbers - time to first token, and
+        # how long the answer actually took - both need the body.
+        body_iterator = getattr(response, "body_iterator", None)
+        if body_iterator is None:  # pragma: no cover - defensive
+            complete(response.status_code)
+            return response
+
+        async def timed() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in body_iterator:
+                    metrics.first_byte()
+                    yield chunk
+            finally:
+                # A client that disconnects mid-stream still gets recorded,
+                # which is how abandoned autocompletes become visible.
+                complete(response.status_code)
+
+        response.body_iterator = timed()  # type: ignore[attr-defined]
+        return response
 
     # Registered on Starlette's base class so router-level 404s get the same
     # envelope as our own aborts; fastapi.HTTPException is a subclass of it.
@@ -154,8 +185,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "model_not_found",
         )
 
+    @app.exception_handler(ContextOverflowError)
+    async def context_overflow_handler(_: Request, exc: ContextOverflowError) -> JSONResponse:
+        # 400 with OpenAI's own code, because that is the one agent clients
+        # recognise and respond to by compacting their transcript.
+        return error_response(
+            400,
+            f"This request needs roughly {exc.estimated_tokens} tokens but the "
+            f"context budget is {exc.budget}. Shorten the conversation, drop "
+            f"attached files, or raise CONTEXT_GUARD_TOKENS and the engine's "
+            f"MAX_MODEL_LEN together.",
+            "invalid_request_error",
+            "context_length_exceeded",
+        )
+
+    @app.exception_handler(RouteDisabledError)
+    async def route_disabled_handler(_: Request, exc: RouteDisabledError) -> JSONResponse:
+        return error_response(
+            404,
+            f"{exc.route} is not enabled on this deployment. "
+            f"Set {exc.setting}=true in .env and start the matching service.",
+            "invalid_request_error",
+            "route_disabled",
+        )
+
     app.include_router(health.router)
     app.include_router(openai_compat.router)
+    app.include_router(retrieval.router)
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict[str, str]:

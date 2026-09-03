@@ -33,12 +33,15 @@ dev = [
   "mypy>=1.11",
 ]
 
+[project.scripts]
+assist = "llm_assistant_agent.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/Ryan121/llm-assistant-api"
 Source = "https://github.com/Ryan121/llm-assistant-api"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/llm_assistant_api"]
+packages = ["src/llm_assistant_api", "src/llm_assistant_agent"]
 
 # ---------------------------------------------------------------------------
 # Tooling
@@ -51,7 +54,7 @@ addopts = "-q --strict-markers"
 filterwarnings = ["error::DeprecationWarning:llm_assistant_api.*"]
 
 [tool.coverage.run]
-source = ["llm_assistant_api"]
+source = ["llm_assistant_api", "llm_assistant_agent"]
 branch = true
 
 [tool.coverage.report]
@@ -70,9 +73,15 @@ ignore = ["S101", "N805", "B008"]  # Ignore specific ruff errors that are legiti
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S105", "S106"]
+# The CLI's whole job is to write to a terminal and to run commands the model
+# chose. Both are flagged by default; both are the point here, and the shell
+# call is gated behind an explicit user approval prompt.
+"src/llm_assistant_agent/render.py" = ["T20"]
+"src/llm_assistant_agent/cli.py" = ["T20"]
+"src/llm_assistant_agent/tools.py" = ["S602"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["llm_assistant_api", "tests"]
+known-first-party = ["llm_assistant_api", "llm_assistant_agent", "tests"]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI's dependency-injection markers are meant to live in argument defaults.
