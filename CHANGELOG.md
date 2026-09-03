@@ -1,6 +1,21 @@
 # CHANGELOG
 
 
+## v0.2.2 (2026-09-03)
+
+### Bug Fixes
+
+- Attempt to resolve agentic session crashing by standardising/simplifying message normalisation
+  steps
+  ([`0a25704`](https://github.com/Ryan121/llm-assistant-api/commit/0a257046f5dbc02a0ba6ec05b1de466d844cd240))
+
+- Change llm port from 8000 > 8999
+  ([`d4b6ffa`](https://github.com/Ryan121/llm-assistant-api/commit/d4b6ffaadf271660a07a7b683bb7f01f0786a620))
+
+- Resolve ruff issues
+  ([`8ba7bbd`](https://github.com/Ryan121/llm-assistant-api/commit/8ba7bbd02f269210aaf828786476e72f7ddb96b0))
+
+
 ## v0.2.1 (2026-09-02)
 
 ### Bug Fixes
