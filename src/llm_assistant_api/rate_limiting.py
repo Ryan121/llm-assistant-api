@@ -3,7 +3,6 @@
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -23,7 +22,7 @@ class RateLimitConfig:
 class RateLimiter:
     """Simple sliding window rate limiter."""
 
-    def __init__(self, config: Optional[RateLimitConfig] = None):
+    def __init__(self, config: RateLimitConfig | None = None):
         if config is None:
             config = RateLimitConfig()
         self.config = config

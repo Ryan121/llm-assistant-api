@@ -5,7 +5,6 @@ from __future__ import annotations
 import hmac
 import logging
 import time
-from typing import Optional
 
 import httpx
 from fastapi import Depends, HTTPException, Request, status
@@ -38,7 +37,7 @@ def get_http_client(request: Request) -> httpx.AsyncClient:
 
 
 def require_api_key(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
 ) -> None:
     """Validate the bearer token.
@@ -104,7 +103,7 @@ def require_api_key(
 
 
 def _get_client_identifier(
-    credentials: Optional[HTTPAuthorizationCredentials], settings: Settings, request: Request
+    credentials: HTTPAuthorizationCredentials | None, settings: Settings, request: Request
 ) -> str:
     """Get a unique identifier for rate limiting purposes."""
     # Try to use the API key as identifier if available

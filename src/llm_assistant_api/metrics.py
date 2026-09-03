@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Any
+from typing import Any
 
 
 @dataclass
@@ -29,7 +29,7 @@ class MetricsCollector:
     """Collects and aggregates metrics for the application."""
 
     def __init__(self) -> None:
-        self._requests: Dict[str, RequestMetrics] = {}
+        self._requests: dict[str, RequestMetrics] = {}
         self._endpoint_counts: defaultdict[str, int] = defaultdict(int)
         self._status_code_counts: defaultdict[int, int] = defaultdict(int)
         self._model_usage: defaultdict[str, int] = defaultdict(int)
@@ -63,7 +63,7 @@ class MetricsCollector:
         """Record usage of a specific model."""
         self._model_usage[model] += 1
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Get a summary of collected metrics."""
         return {
             "total_requests": self._total_requests,
@@ -74,7 +74,7 @@ class MetricsCollector:
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-    def get_request_stats(self) -> Dict[str, Any]:
+    def get_request_stats(self) -> dict[str, Any]:
         """Get statistics about recent requests."""
         if not self._requests:
             return {"average_response_time_ms": 0, "active_requests": 0}

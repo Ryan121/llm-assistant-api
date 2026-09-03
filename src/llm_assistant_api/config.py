@@ -10,10 +10,9 @@ from __future__ import annotations
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Tuple
 
 
-def _split_csv(raw: str) -> Tuple[str, ...]:
+def _split_csv(raw: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
