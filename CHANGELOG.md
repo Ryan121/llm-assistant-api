@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.4.1 (2026-09-04)
+
+### Bug Fixes
+
+- Revise malformed agent parsing with the qwen model
+  ([`b8be482`](https://github.com/Ryan121/llm-assistant-api/commit/b8be482808d1759a05004174728a181b0ee7fcc5))
+
+
 ## v0.4.0 (2026-09-03)
 
 ### Features
