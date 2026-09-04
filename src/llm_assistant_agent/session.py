@@ -89,10 +89,17 @@ class Session:
     context_window: int = 0
     auto_approve: bool = False
     messages: list[dict[str, Any]] = field(default_factory=list)
+    _rules_sent: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
-        if not self.messages:
-            self.messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        # The rules open the first user turn rather than sitting in a system
+        # message. A long system message displaces Qwen3-Coder's tool-call
+        # format exemplar: the model then emits <function=...> without the
+        # opening <tool_call>, and vLLM's parser - correctly - streams the
+        # malformed call through as plain text, so no tool ever runs. A short
+        # system message is fine; this one is not, and telling the model to
+        # emit the wrapper does not fix it.
+        self._rules_sent = bool(self.messages)
 
     # --- approval ---------------------------------------------------------
 
@@ -106,6 +113,9 @@ class Session:
 
     async def ask(self, http: httpx.AsyncClient, user_message: str) -> None:
         """Run one user message to completion."""
+        if not self._rules_sent:
+            user_message = f"{SYSTEM_PROMPT}\n\n---\n\n{user_message}"
+            self._rules_sent = True
         self.messages.append({"role": "user", "content": user_message})
         toolbox = ToolBox(self.workspace, self.approve)
 

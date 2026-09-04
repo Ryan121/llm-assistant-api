@@ -11,6 +11,7 @@ to act on.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -182,6 +183,15 @@ def _consume(
                 partial.arguments += function["arguments"]
 
 
+#: A tool call the upstream parser did not recognise arrives as ordinary
+#: content instead of a tool call, and nothing runs. The model has to emit a
+#: wrapper the parser matches, and drops it often enough - Qwen3-Coder omits
+#: the opening <tool_call> when the system message is long - that it is worth
+#: catching by hand. Without this the failure is silent: the reply is XML the
+#: user did not ask for and the agent stops, having done nothing.
+_LEAKED_CALL = re.compile(r"<function\s*=\s*([A-Za-z_][A-Za-z0-9_-]*)\s*>")
+
+
 def _finalise(turn: AssistantTurn, partials: dict[int, _PartialToolCall]) -> list[dict[str, Any]]:
     """Validate assembled calls, keeping only those safe to execute."""
     raw: list[dict[str, Any]] = []
@@ -217,6 +227,22 @@ def _finalise(turn: AssistantTurn, partials: dict[int, _PartialToolCall]) -> lis
                 "function": {"name": partial.name, "arguments": text},
             }
         )
+
+    # Only when nothing parsed. A turn that made a real call and also happens to
+    # quote this syntax - likely while working on this repository - is fine, and
+    # second-guessing it would be worse than the failure being caught here.
+    if not raw:
+        leaked = _LEAKED_CALL.search(turn.content)
+        # A real emission carries an argument block or the wrapper the parser
+        # missed. Prose that just names the syntax carries neither, and telling
+        # the model to retry a call it never made wastes a turn.
+        emitted = "</tool_call>" in turn.content or "<parameter=" in turn.content
+        if leaked and emitted and "</function>" in turn.content:
+            turn.malformed.append(
+                f"{leaked.group(1)}: the call arrived as plain text rather than a "
+                "tool call, so it was not executed. Emit it in the exact format you "
+                "were given, including both the opening and the closing wrapper tags."
+            )
 
     return raw
 

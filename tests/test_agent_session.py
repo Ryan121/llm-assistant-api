@@ -222,6 +222,83 @@ async def test_a_malformed_tool_call_prompts_a_retry_rather_than_hanging(
     assert "did not arrive intact" in gateway.requests[1]["messages"][-1]["content"]
 
 
+async def test_a_tool_call_leaked_as_text_prompts_a_retry(workspace: Workspace) -> None:
+    """The upstream parser rejects a call missing its wrapper and streams it as content.
+
+    Nothing runs and no fragment ever arrives, so without this the agent stops
+    silently having done nothing - the failure that is expensive to diagnose.
+    """
+    leaked = text_turn(
+        "I'll look at the tests first.\n\n"
+        "<function=list_files>\n<parameter=pattern>\n**/test*.py\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    gateway = ScriptedGateway([leaked, text_turn("Sorry, retrying.")])
+    session = _session(workspace)
+
+    await _ask(session, gateway, "run the unit tests")
+
+    assert len(gateway.requests) == 2
+    retry = gateway.requests[1]["messages"][-1]["content"]
+    assert "did not arrive intact" in retry
+    # Naming the tool and the cause is what makes the retry actionable.
+    assert "list_files" in retry
+    assert "plain text" in retry
+
+
+async def test_prose_about_tool_call_syntax_is_not_flagged(workspace: Workspace) -> None:
+    """Asked about this bug, the agent has to be able to describe it without retrying."""
+    gateway = ScriptedGateway(
+        [text_turn("The parser wants <function=name></function> inside a wrapper.")]
+    )
+    session = _session(workspace)
+
+    await _ask(session, gateway, "why did the tool call fail?")
+
+    assert len(gateway.requests) == 1
+
+
+async def test_quoting_tool_call_syntax_alongside_a_real_call_is_not_flagged(
+    workspace: Workspace,
+) -> None:
+    """An agent working on this repository will quote this syntax legitimately."""
+    quoted = _sse(
+        [
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": "The parser wants <function=x></function> wrapped.",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {
+                                        "name": "read_file",
+                                        "arguments": json.dumps({"path": "notes.txt"}),
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        ]
+    )
+    (workspace.root / "notes.txt").write_text("hello\n", encoding="utf-8")
+    gateway = ScriptedGateway([quoted, text_turn("done")])
+    session = _session(workspace)
+
+    await _ask(session, gateway, "read the notes")
+
+    assert not any(
+        "did not arrive intact" in str(m.get("content"))
+        for request in gateway.requests
+        for m in request["messages"]
+    )
+
+
 async def test_tools_are_advertised_on_every_request(workspace: Workspace) -> None:
     gateway = ScriptedGateway([text_turn("hi")])
     session = _session(workspace)
@@ -239,9 +316,9 @@ async def test_the_system_prompt_forbids_committing(workspace: Workspace) -> Non
 
     await _ask(session, gateway, "hello")
 
-    system = gateway.requests[0]["messages"][0]
-    assert system["role"] == "system"
-    assert "git commit" in system["content"]
+    opening = gateway.requests[0]["messages"][0]
+    assert opening["role"] == "user"
+    assert "git commit" in opening["content"]
 
 
 # --- context management ----------------------------------------------------
@@ -260,7 +337,8 @@ async def test_the_transcript_is_compacted_before_it_overflows(
     await _ask(session, gateway, "carry on")
 
     sent = gateway.requests[0]["messages"]
-    assert sent[0]["role"] == "system"
+    # Compaction keeps the head, which is where the rules now live.
+    assert sent[0]["role"] == "user"
     assert any("were dropped" in str(m.get("content")) for m in sent)
     assert len(sent) < 22
 
@@ -291,4 +369,5 @@ async def test_no_compaction_without_a_declared_window(workspace: Workspace) -> 
 
     await _ask(session, gateway, "carry on")
 
-    assert len(gateway.requests[0]["messages"]) == 12
+    # Ten filler turns plus the new one; the rules ride on the first user turn.
+    assert len(gateway.requests[0]["messages"]) == 11
