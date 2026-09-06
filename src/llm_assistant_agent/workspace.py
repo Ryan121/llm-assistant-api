@@ -147,7 +147,54 @@ class Workspace:
         result = self._git("status", "--porcelain")
         return bool(result.stdout.strip())
 
+    def head(self) -> str | None:
+        """The current commit, recorded with a session so a resume can tell
+        whether the code has moved on underneath it."""
+        if not self.is_git_repo:
+            return None
+        return self._git("rev-parse", "HEAD").stdout.strip() or None
+
     def diff_stat(self) -> str:
         """``git diff --stat`` over the working tree, for the end-of-turn summary."""
         result = self._git("diff", "--stat")
         return result.stdout.strip()
+
+    def diff(self, path: str | None = None, *, stat: bool = False) -> str:
+        """Uncommitted changes, for the model to review its own work.
+
+        Untracked files are included - a new file the agent just wrote is
+        exactly what it most needs to see, and plain ``git diff`` would show
+        nothing for it.
+        """
+        if not self.is_git_repo:
+            raise WorkspaceError(
+                "This workspace is not a git repository, so there is no diff to show."
+            )
+
+        arguments = ["diff", "--stat" if stat else "--patch"]
+        if path:
+            # Resolved first, so the path cannot walk out of the workspace.
+            arguments += ["--", self.relative(self.resolve(path))]
+
+        result = self._git(*arguments)
+        if result.returncode != 0:
+            raise WorkspaceError(f"git diff failed: {result.stderr.strip()}")
+
+        sections = [result.stdout.strip()]
+        if not path:
+            sections.extend(self._untracked_sections(stat=stat))
+        return "\n".join(section for section in sections if section)
+
+    def _untracked_sections(self, *, stat: bool) -> list[str]:
+        listing = self._git("ls-files", "--others", "--exclude-standard")
+        names = [name for name in listing.stdout.splitlines() if name.strip()]
+        if not names:
+            return []
+        if stat:
+            return [f"untracked: {', '.join(names)}"]
+        # --no-index against /dev/null renders a new file as an addition,
+        # which is the shape the model already knows how to read.
+        return [
+            self._git("diff", "--no-index", "--", "/dev/null", name).stdout.strip()
+            for name in names
+        ]

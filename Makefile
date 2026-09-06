@@ -234,6 +234,26 @@ vscode-config: ## Print VS Code / Continue configuration for this deployment
 vscode-install: ## Write ~/.continue/config.yaml (backs up any existing file)
 	@scripts/vscode-config.sh --install
 
+## --- Agent sandbox ---------------------------------------------------------
+
+SANDBOX_IMAGE ?= assist-sandbox:latest
+
+.PHONY: sandbox-image
+sandbox-image: ## Build the container the agent's `run` tool executes in
+	@docker build -f docker/sandbox.Dockerfile -t $(SANDBOX_IMAGE) .
+
+.PHONY: sandbox-status
+sandbox-status: ## Show the agent sandbox containers and what they are costing
+	@docker ps --all --filter label=app=assist-sandbox \
+	  --format 'table {{.Names}}\t{{.State}}\t{{.Size}}\t{{.CreatedAt}}' \
+	  || echo "no sandbox containers"
+
+.PHONY: sandbox-wipe
+sandbox-wipe: ## Throw away every agent sandbox container. Nothing in them is precious
+	@docker ps --all --quiet --filter label=app=assist-sandbox \
+	  | xargs -r docker rm --force --volumes \
+	  && echo "sandboxes removed; the next run rebuilds one"
+
 ## --- Development -----------------------------------------------------------
 
 .PHONY: venv

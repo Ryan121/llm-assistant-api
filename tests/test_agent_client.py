@@ -13,7 +13,13 @@ from typing import Any
 import httpx
 import pytest
 
-from llm_assistant_agent.client import ChatClient, TurnError
+from llm_assistant_agent.client import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_P,
+    ChatClient,
+    TurnError,
+)
 
 BASE_URL = "http://gateway.test/v1"
 
@@ -198,3 +204,49 @@ async def test_an_unreachable_gateway_names_the_url() -> None:
 
     with pytest.raises(TurnError, match=BASE_URL):
         await _run(httpx.MockTransport(handler))
+
+
+# --- sampling --------------------------------------------------------------
+
+
+async def _sent_payload(client: ChatClient) -> dict[str, Any]:
+    """Run one empty turn and return the request body the client built."""
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            content=b"data: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        await client.turn(http, [], [], on_text=lambda _chunk: None)
+    return captured
+
+
+async def test_sampling_is_sent_explicitly_rather_than_left_to_the_model() -> None:
+    """Unset, vLLM falls back to generation_config.json - chat defaults, not ours."""
+    payload = await _sent_payload(ChatClient(BASE_URL, "sk-test", "test-model"))
+
+    assert payload["temperature"] == DEFAULT_TEMPERATURE
+    assert payload["top_p"] == DEFAULT_TOP_P
+    assert payload["max_tokens"] == DEFAULT_MAX_TOKENS
+
+
+async def test_sampling_can_be_overridden() -> None:
+    payload = await _sent_payload(
+        ChatClient(BASE_URL, "sk-test", "test-model", temperature=0.9, top_p=1.0, max_tokens=256)
+    )
+
+    assert payload["temperature"] == 0.9
+    assert payload["top_p"] == 1.0
+    assert payload["max_tokens"] == 256
+
+
+async def test_zero_max_tokens_defers_to_the_gateway_cap() -> None:
+    """Omitted, not sent as 0 - which vLLM would read as 'generate nothing'."""
+    payload = await _sent_payload(ChatClient(BASE_URL, "sk-test", "test-model", max_tokens=0))
+
+    assert "max_tokens" not in payload

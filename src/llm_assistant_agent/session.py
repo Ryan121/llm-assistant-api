@@ -13,15 +13,18 @@ the model is actually working from.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
+from .checks import Checks
 from .client import AssistantTurn, ChatClient, ToolCall, TurnError
 from .render import Renderer
-from .tools import TOOL_SCHEMAS, ToolBox, ToolOutcome
+from .sandbox import HostSandbox, Sandbox
+from .tools import DECLINED, TOOL_SCHEMAS, ToolBox, ToolOutcome
 from .workspace import Workspace
 
 __all__ = ["Session", "SYSTEM_PROMPT"]
@@ -41,6 +44,12 @@ How to work:
   the run tool if there is an obvious command for it.
 - If a tool returns an error, read it and correct course - the message says
   what to do differently.
+- Editing a file may report problems found in it afterwards. Those are real -
+  fix them before moving on, rather than leaving the file worse than you found
+  it.
+- Before your final answer, call git_diff and read your whole change. Edits
+  that were each right on their own can still be wrong together: a leftover
+  import, a helper you stopped using, an edit landed in the wrong place.
 
 Your edits go into the user's working tree uncommitted, so they will review a
 diff afterwards. Never run git commit, git push, or any other command that
@@ -76,6 +85,9 @@ def _summarise_arguments(name: str, arguments: dict[str, Any]) -> str:
         return str(arguments.get("pattern", "") or "(all)")
     if name == "run":
         return str(arguments.get("command", ""))
+    if name == "git_diff":
+        path = arguments.get("path")
+        return str(path) if path else ("summary" if arguments.get("summary") else "(all)")
     return ""
 
 
@@ -88,6 +100,8 @@ class Session:
     renderer: Renderer
     context_window: int = 0
     auto_approve: bool = False
+    checks: Checks = field(default_factory=Checks)
+    sandbox: Sandbox = field(default_factory=HostSandbox)
     messages: list[dict[str, Any]] = field(default_factory=list)
     _rules_sent: bool = field(default=False, init=False)
 
@@ -112,12 +126,28 @@ class Session:
     # --- the loop ---------------------------------------------------------
 
     async def ask(self, http: httpx.AsyncClient, user_message: str) -> None:
-        """Run one user message to completion."""
+        """Run one user message to completion.
+
+        Cancellable. On cancellation the transcript is left in a state the
+        gateway will still accept, so the session can carry on, and the
+        ``CancelledError`` is re-raised for the caller to report.
+        """
+        try:
+            await self._ask(http, user_message)
+        except asyncio.CancelledError:
+            closed = self.repair_after_cancel()
+            if closed:
+                self.renderer.note(
+                    f"closed {closed} unfinished tool call{'s' if closed != 1 else ''}"
+                )
+            raise
+
+    async def _ask(self, http: httpx.AsyncClient, user_message: str) -> None:
         if not self._rules_sent:
             user_message = f"{SYSTEM_PROMPT}\n\n---\n\n{user_message}"
             self._rules_sent = True
         self.messages.append({"role": "user", "content": user_message})
-        toolbox = ToolBox(self.workspace, self.approve)
+        toolbox = ToolBox(self.workspace, self.approve, self.checks, self.sandbox)
 
         for _ in range(_MAX_STEPS):
             self._compact_if_needed()
@@ -163,23 +193,35 @@ class Session:
                 self._finish_turn()
                 return
 
-            self._execute(toolbox, turn)
+            await self._execute(toolbox, turn)
 
         self.renderer.warn(f"Stopped after {_MAX_STEPS} steps without a final answer.")
         self._finish_turn()
 
-    def _execute(self, toolbox: ToolBox, turn: AssistantTurn) -> None:
+    async def _execute(self, toolbox: ToolBox, turn: AssistantTurn) -> None:
         for call in turn.tool_calls:
             self.renderer.tool_call(call.name, _summarise_arguments(call.name, call.arguments))
-            outcome = toolbox.invoke(call.name, call.arguments)
-            self._report(call, outcome)
-            self.messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "content": outcome.content,
-                }
+
+            # Asked here, on the event loop, rather than inside the worker
+            # thread below: a prompt blocked on stdin in a thread cannot be
+            # cancelled, and would carry on reading after the turn is gone.
+            request = toolbox.approval_for(call.name, call.arguments)
+            if request is not None and not self.approve(*request):
+                self.renderer.tool_error("declined by the user")
+                self._record(call, DECLINED)
+                continue
+
+            # In a thread so that a long command - a test suite, a build - does
+            # not hold the event loop, which is what makes Ctrl-C during one
+            # do nothing at all.
+            outcome = await asyncio.to_thread(
+                toolbox.invoke, call.name, call.arguments, approved=True
             )
+            self._report(call, outcome)
+            self._record(call, outcome.content)
+
+    def _record(self, call: ToolCall, content: str) -> None:
+        self.messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
 
     def _report(self, call: ToolCall, outcome: ToolOutcome) -> None:
         if outcome.is_error:
@@ -190,6 +232,58 @@ class Session:
         elif call.name == "run":
             for line in outcome.content.splitlines()[:20]:
                 self.renderer.note(line)
+        # Shown as well as sent, so the user sees what the model was told to fix
+        # rather than only the retry it prompts.
+        for line in (outcome.findings or "").splitlines():
+            self.renderer.tool_error(line)
+
+    # --- cancellation -----------------------------------------------------
+
+    def repair_after_cancel(self) -> int:
+        """Answer any tool call the cancelled turn left open.
+
+        A cancel can land between the assistant message that asked for N tool
+        calls and the N results answering it. That transcript is not merely
+        untidy - an assistant message carrying ``tool_calls`` must be followed
+        by a result for every ``tool_call_id``, so the *next* request would be
+        rejected outright. Keeping the history and then being unable to use it
+        is the worst of both, hence closing the gap here.
+
+        Idempotent, and returns how many results it had to invent.
+        """
+        open_calls = self._unanswered_tool_calls()
+        for call_id in open_calls:
+            self.messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    # Written for the model: it should know the tool did not
+                    # run, rather than assume an empty result means no output.
+                    "content": "The user interrupted this turn before the tool ran.",
+                }
+            )
+        return len(open_calls)
+
+    def _unanswered_tool_calls(self) -> list[str]:
+        """Ids requested by the most recent assistant turn but never answered."""
+        for index in range(len(self.messages) - 1, -1, -1):
+            message = self.messages[index]
+            if message.get("role") != "assistant":
+                continue
+            calls = message.get("tool_calls") or []
+            if not calls:
+                return []
+            answered = {
+                later.get("tool_call_id")
+                for later in self.messages[index + 1 :]
+                if later.get("role") == "tool"
+            }
+            return [
+                str(call["id"])
+                for call in calls
+                if isinstance(call, dict) and call.get("id") and call["id"] not in answered
+            ]
+        return []
 
     def _finish_turn(self) -> None:
         stat = self.workspace.diff_stat() if self.workspace.is_git_repo else ""

@@ -18,7 +18,39 @@ from typing import Any
 
 import httpx
 
-__all__ = ["AssistantTurn", "ChatClient", "ToolCall", "TurnError"]
+__all__ = [
+    "DEFAULT_MAX_TOKENS",
+    "DEFAULT_TEMPERATURE",
+    "DEFAULT_TOP_P",
+    "AssistantTurn",
+    "ChatClient",
+    "ToolCall",
+    "TurnError",
+]
+
+#: Sampling is set explicitly rather than left to the model's
+#: ``generation_config.json``, which for Qwen3-Coder is tuned for chat
+#: (temperature 0.7) and is wrong for this loop. ``edit_file`` requires
+#: ``old_string`` to be reproduced byte for byte, indentation included, and the
+#: applier deliberately refuses anything less than an exact match - so sampling
+#: variance does not produce a slightly different edit, it produces a failed one
+#: that costs a re-read and a retry. Low temperature is worth more here than
+#: variety is.
+#:
+#: Not zero: greedy decoding leaves nothing to break a repetition loop, and a
+#: model that starts repeating itself burns the step budget instead of a turn.
+DEFAULT_TEMPERATURE = 0.1
+
+#: Qwen's own recommendation for the coder models, and harmless at this
+#: temperature - the tail it trims is already near-unreachable.
+DEFAULT_TOP_P = 0.8
+
+#: An explicit ceiling, so a generation cannot run into the context limit
+#: mid-tool-call. That truncation is precisely what ``_finalise`` has to reject
+#: below, and an unbounded request also holds a KV-cache slot upstream for as
+#: long as it keeps going. Large enough for a whole-file ``write_file``.
+#: Zero omits the field and defers to the gateway's own cap.
+DEFAULT_MAX_TOKENS = 8192
 
 
 class TurnError(Exception):
@@ -68,11 +100,17 @@ class ChatClient:
         model: str,
         *,
         timeout: float = 900.0,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_p: float = DEFAULT_TOP_P,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_tokens = max_tokens
 
     def _headers(self) -> dict[str, str]:
         headers = {"content-type": "application/json"}
@@ -97,7 +135,11 @@ class ChatClient:
             "model": self.model,
             "messages": messages,
             "stream": True,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
         }
+        if self.max_tokens > 0:
+            payload["max_tokens"] = self.max_tokens
         if tools:
             payload["tools"] = tools
 

@@ -215,3 +215,84 @@ def test_commands_time_out(toolbox: ToolBox, monkeypatch: pytest.MonkeyPatch) ->
 
     assert outcome.is_error
     assert "timed out" in outcome.content
+
+
+# --- git_diff --------------------------------------------------------------
+
+
+@pytest.fixture
+def git_toolbox(workspace: Workspace) -> ToolBox:
+    """A committed baseline, so later edits show up as a diff."""
+    for arguments in (
+        ["init", "-q", "."],
+        ["config", "user.email", "agent@test"],
+        ["config", "user.name", "agent"],
+        ["add", "-A"],
+        ["commit", "-qm", "baseline"],
+    ):
+        subprocess.run(  # noqa: S603
+            ["git", *arguments],  # noqa: S607
+            cwd=workspace.root,
+            check=True,
+            capture_output=True,
+        )
+    return ToolBox(workspace, approver=lambda description, detail: True)
+
+
+def test_git_diff_shows_an_edit(git_toolbox: ToolBox) -> None:
+    (git_toolbox.workspace.root / "src" / "app.py").write_text(
+        "def main():\n    return 2\n", encoding="utf-8"
+    )
+
+    outcome = git_toolbox.invoke("git_diff", {})
+
+    assert "-    return 1" in outcome.content
+    assert "+    return 2" in outcome.content
+
+
+def test_git_diff_includes_files_the_agent_created(git_toolbox: ToolBox) -> None:
+    """Plain 'git diff' shows nothing for an untracked file - the agent's own
+    new file is exactly what it most needs to review."""
+    git_toolbox.invoke("write_file", {"path": "fresh.py", "content": "VALUE = 1\n"})
+
+    outcome = git_toolbox.invoke("git_diff", {})
+
+    assert "fresh.py" in outcome.content
+    assert "+VALUE = 1" in outcome.content
+
+
+def test_git_diff_summary_is_cheaper_than_the_patch(git_toolbox: ToolBox) -> None:
+    (git_toolbox.workspace.root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    outcome = git_toolbox.invoke("git_diff", {"summary": True})
+
+    assert "src/app.py" in outcome.content
+    assert "+x = 1" not in outcome.content
+
+
+def test_git_diff_can_be_narrowed_to_one_path(git_toolbox: ToolBox) -> None:
+    (git_toolbox.workspace.root / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (git_toolbox.workspace.root / "README.md").write_text("# changed\n", encoding="utf-8")
+
+    outcome = git_toolbox.invoke("git_diff", {"path": "src/app.py"})
+
+    assert "src/app.py" in outcome.content
+    assert "README.md" not in outcome.content
+
+
+def test_git_diff_refuses_a_path_outside_the_workspace(git_toolbox: ToolBox) -> None:
+    outcome = git_toolbox.invoke("git_diff", {"path": "../../etc/hosts"})
+
+    assert outcome.is_error
+    assert "outside the workspace" in outcome.content
+
+
+def test_git_diff_says_so_when_there_is_nothing_to_show(git_toolbox: ToolBox) -> None:
+    assert git_toolbox.invoke("git_diff", {}).content == "No uncommitted changes."
+
+
+def test_git_diff_outside_a_repository_is_an_error_not_a_crash(toolbox: ToolBox) -> None:
+    outcome = toolbox.invoke("git_diff", {})
+
+    assert outcome.is_error
+    assert "not a git repository" in outcome.content

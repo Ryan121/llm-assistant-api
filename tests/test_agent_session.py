@@ -6,7 +6,9 @@ edit, verify, answer - runs hermetically, with no model and no network.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,7 @@ import pytest
 from llm_assistant_agent.client import ChatClient
 from llm_assistant_agent.render import Renderer
 from llm_assistant_agent.session import Session
+from llm_assistant_agent.tools import ToolOutcome
 from llm_assistant_agent.workspace import Workspace
 
 BASE_URL = "http://gateway.test/v1"
@@ -371,3 +374,128 @@ async def test_no_compaction_without_a_declared_window(workspace: Workspace) -> 
 
     # Ten filler turns plus the new one; the rules ride on the first user turn.
     assert len(gateway.requests[0]["messages"]) == 11
+
+
+# --- cancellation ----------------------------------------------------------
+
+
+def _pending_call_transcript() -> list[dict[str, Any]]:
+    """One assistant turn asking for two tools, with only the first answered."""
+    return [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "grep", "arguments": "{}"},
+                },
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "run", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "matched"},
+    ]
+
+
+def test_repair_answers_the_call_the_cancel_interrupted(workspace: Workspace) -> None:
+    session = _session(workspace)
+    session.messages = _pending_call_transcript()
+
+    assert session.repair_after_cancel() == 1
+
+    assert session.messages[-1]["tool_call_id"] == "call_2"
+    assert "interrupted" in session.messages[-1]["content"]
+
+
+def test_repair_is_idempotent(workspace: Workspace) -> None:
+    session = _session(workspace)
+    session.messages = _pending_call_transcript()
+
+    assert session.repair_after_cancel() == 1
+    assert session.repair_after_cancel() == 0
+
+
+def test_repair_leaves_a_completed_turn_alone(workspace: Workspace) -> None:
+    session = _session(workspace)
+    session.messages = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "all done"},
+    ]
+
+    assert session.repair_after_cancel() == 0
+    assert len(session.messages) == 2
+
+
+async def test_cancelling_during_a_tool_leaves_a_transcript_that_can_be_reused(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of the repair: an unanswered tool_call_id would be rejected."""
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingToolBox:
+        def __init__(self, *_args: Any) -> None: ...
+
+        def approval_for(self, *_args: Any) -> tuple[str, str] | None:
+            return None
+
+        def invoke(self, *_args: Any, **_kwargs: Any) -> ToolOutcome:
+            started.set()
+            release.wait(timeout=5)
+            return ToolOutcome("never reported")
+
+    monkeypatch.setattr("llm_assistant_agent.session.ToolBox", BlockingToolBox)
+
+    gateway = ScriptedGateway([tool_turn("grep", {"pattern": "x"}, call_id="call_1")])
+    session = _session(workspace)
+
+    async with httpx.AsyncClient(transport=gateway.transport()) as http:
+        task = asyncio.create_task(session.ask(http, "search"))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    release.set()
+
+    requested = [
+        call["id"]
+        for message in session.messages
+        if message.get("role") == "assistant"
+        for call in message.get("tool_calls") or []
+    ]
+    answered = [m["tool_call_id"] for m in session.messages if m.get("role") == "tool"]
+    assert requested == ["call_1"]
+    assert answered == requested
+
+
+async def test_a_cancelled_turn_keeps_the_history(workspace: Workspace) -> None:
+    """Cancelling is not a reset - the earlier conversation survives."""
+    gateway = ScriptedGateway([text_turn("first answer")])
+    session = _session(workspace)
+    await _ask(session, gateway, "the first question")
+    before = len(session.messages)
+
+    async with httpx.AsyncClient(transport=_hanging_transport()) as http:
+        task = asyncio.create_task(session.ask(http, "the second question"))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert len(session.messages) > before
+    assert session.messages[0]["content"].endswith("the first question")
+    assert any(m.get("content") == "first answer" for m in session.messages)
+
+
+def _hanging_transport() -> httpx.MockTransport:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()  # pragma: no cover - cancelled first
+        raise AssertionError
+
+    return httpx.MockTransport(handler)

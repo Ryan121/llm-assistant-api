@@ -19,15 +19,27 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from .checks import Checks
 from .edits import EditError, apply_edit, unified_diff
+from .sandbox import HostSandbox, Sandbox
 from .workspace import Workspace, WorkspaceError
 
-__all__ = ["TOOL_SCHEMAS", "ToolBox", "ToolOutcome"]
+__all__ = ["DECLINED", "TOOL_SCHEMAS", "ToolBox", "ToolOutcome"]
+
+#: Returned as the tool result when the user says no. Phrased for the model:
+#: it needs to carry on sensibly, not treat this as a failure to retry.
+DECLINED = (
+    "The user declined to run that command. Ask what they would prefer, or continue without it."
+)
 
 #: Cap on grep/list output. Past this the model stops reading anyway, and the
 #: tokens come out of the context budget the conversation needs.
 _MAX_MATCHES = 100
 _MAX_LISTED_FILES = 200
+
+#: A whole-repo diff can be enormous. Truncated rather than refused, because
+#: the head of a diff is the useful part and the model can narrow from there.
+_MAX_DIFF_CHARS = 20_000
 
 
 @dataclass
@@ -39,6 +51,9 @@ class ToolOutcome:
     diff: str | None = None
     path: str | None = None
     is_error: bool = False
+    #: What the checkers said about the file, so the CLI can show it too. The
+    #: user should see the same problems the model was handed.
+    findings: str | None = None
 
 
 class Approver(Protocol):
@@ -151,6 +166,33 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "git_diff",
+            "description": (
+                "Show your own uncommitted changes to the working tree, including "
+                "files you created. Read-only. Use it before you give your final "
+                "answer, to check the whole change reads the way you intended - "
+                "this is the only way to see your edits together rather than one "
+                "at a time. Start with summary=true on a large change, then narrow "
+                "to one path."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Restrict to one file. Optional; omit for everything.",
+                    },
+                    "summary": {
+                        "type": "boolean",
+                        "description": "Per-file line counts only, instead of the patch.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run",
             "description": (
                 "Run a shell command in the workspace and return its output. Use it "
@@ -173,17 +215,49 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 class ToolBox:
     """Executes tool calls against one workspace."""
 
-    def __init__(self, workspace: Workspace, approver: Approver) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        approver: Approver,
+        checks: Checks | None = None,
+        sandbox: Sandbox | None = None,
+    ) -> None:
         self.workspace = workspace
         self.approver = approver
+        self.checks = checks or Checks()
+        self.sandbox = sandbox or HostSandbox()
 
-    def invoke(self, name: str, arguments: dict[str, Any]) -> ToolOutcome:
+    def approval_for(self, name: str, arguments: dict[str, Any]) -> tuple[str, str] | None:
+        """What the user must authorise before ``name`` runs, if anything.
+
+        Split out from :meth:`invoke` so a caller running tools off the event
+        loop can ask *before* handing the work to a worker thread. A prompt
+        blocked on stdin inside a thread cannot be cancelled, and would go on
+        reading the user's next keystrokes after the turn it belonged to is
+        gone.
+        """
+        if name != "run":
+            return None
+        command = str(arguments.get("command", "")).strip()
+        # The label says where it will run: approving `rm -rf /` in a container
+        # is a different decision from approving it on your laptop.
+        return (f"Run a shell command {self.sandbox.label}", command) if command else None
+
+    def invoke(
+        self, name: str, arguments: dict[str, Any], *, approved: bool = False
+    ) -> ToolOutcome:
+        """Run one tool. ``approved`` means the caller already asked the user."""
+        request = self.approval_for(name, arguments)
+        if request is not None and not approved and not self.approver(*request):
+            return ToolOutcome(DECLINED, is_error=True)
+
         handler = {
             "list_files": self._list_files,
             "grep": self._grep,
             "read_file": self._read_file,
             "edit_file": self._edit_file,
             "write_file": self._write_file,
+            "git_diff": self._git_diff,
             "run": self._run,
         }.get(name)
 
@@ -271,7 +345,7 @@ class ToolBox:
         diff = unified_diff(before, after, path)
         # The model gets a confirmation, not the whole file back: it already
         # knows what it asked for, and re-sending the file doubles the context.
-        return ToolOutcome(f"Edited {path}.", diff=diff, path=path)
+        return self._checked(f"Edited {path}.", path, diff=diff)
 
     def _write_file(self, arguments: dict[str, Any]) -> ToolOutcome:
         path = str(arguments.get("path", ""))
@@ -281,7 +355,40 @@ class ToolBox:
 
         self.workspace.write(path, content)
         verb = "Updated" if before else "Created"
-        return ToolOutcome(f"{verb} {path}.", diff=unified_diff(before, content, path), path=path)
+        return self._checked(f"{verb} {path}.", path, diff=unified_diff(before, content, path))
+
+    def _checked(self, confirmation: str, path: str, *, diff: str) -> ToolOutcome:
+        """Report the write, plus anything the checkers found in it.
+
+        Reported as a problem rather than an error: the edit did land, and
+        telling the model it failed would invite it to apply the same change
+        twice.
+        """
+        findings = self.checks.run(self.workspace.root, path)
+        if not findings:
+            return ToolOutcome(confirmation, diff=diff, path=path)
+        return ToolOutcome(
+            f"{confirmation}\n\nProblems found in {path} afterwards:\n{findings}\n"
+            "Fix these before moving on.",
+            diff=diff,
+            path=path,
+            findings=findings,
+        )
+
+    def _git_diff(self, arguments: dict[str, Any]) -> ToolOutcome:
+        path = arguments.get("path")
+        text = self.workspace.diff(
+            str(path) if isinstance(path, str) and path else None,
+            stat=bool(arguments.get("summary", False)),
+        )
+        if not text:
+            return ToolOutcome("No uncommitted changes.")
+        if len(text) > _MAX_DIFF_CHARS:
+            text = (
+                text[:_MAX_DIFF_CHARS] + f"\n... diff truncated at {_MAX_DIFF_CHARS} characters. "
+                "Call again with summary=true, or with a single path."
+            )
+        return ToolOutcome(text)
 
     def _run(self, arguments: dict[str, Any]) -> ToolOutcome:
         command = str(arguments.get("command", "")).strip()
@@ -291,19 +398,14 @@ class ToolBox:
         timeout = arguments.get("timeout_seconds")
         seconds = timeout if isinstance(timeout, int) and 0 < timeout <= 900 else 120
 
-        # The one thing in this tool set git cannot undo.
-        if not self.approver("Run a shell command", command):
-            return ToolOutcome(
-                "The user declined to run that command. Ask what they would prefer, "
-                "or continue without it.",
-                is_error=True,
-            )
-
+        # Approval - the one thing in this tool set git cannot undo - has
+        # already happened in invoke(), or in the caller that passed approved.
+        execution = self.sandbox.prepare(command, self.workspace.root)
         try:
-            result = subprocess.run(  # noqa: S602
-                command,
-                shell=True,
-                cwd=self.workspace.root,
+            result = subprocess.run(  # noqa: S602, S603
+                execution.argv,
+                shell=execution.shell,
+                cwd=execution.cwd,
                 capture_output=True,
                 text=True,
                 timeout=seconds,
@@ -311,6 +413,8 @@ class ToolBox:
             )
         except subprocess.TimeoutExpired:
             return ToolOutcome(f"Command timed out after {seconds}s.", is_error=True)
+        except OSError as exc:
+            return ToolOutcome(f"Could not run the command: {exc}", is_error=True)
 
         output = (result.stdout + result.stderr).strip()
         if len(output) > 20_000:
