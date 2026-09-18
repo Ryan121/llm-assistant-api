@@ -18,7 +18,7 @@ import pytest
 
 from llm_assistant_agent.client import ChatClient
 from llm_assistant_agent.render import Renderer
-from llm_assistant_agent.session import Session
+from llm_assistant_agent.session import _REPEAT_ABORT, Session
 from llm_assistant_agent.tools import ToolOutcome
 from llm_assistant_agent.workspace import Workspace
 
@@ -191,6 +191,89 @@ async def test_a_declined_command_does_not_end_the_session(workspace: Workspace)
         m for request in gateway.requests for m in request["messages"] if m["role"] == "tool"
     ]
     assert any("declined" in m["content"] for m in tool_results)
+
+
+async def test_a_declined_edit_leaves_the_file_alone(workspace: Workspace) -> None:
+    """End to end: the model asks, the user says no, nothing is written."""
+    path = workspace.root / "app.py"
+    before = path.read_text(encoding="utf-8")
+    gateway = ScriptedGateway(
+        [
+            tool_turn("read_file", {"path": "app.py"}),
+            tool_turn(
+                "edit_file",
+                {"path": "app.py", "old_string": "return 1", "new_string": "return 2"},
+            ),
+            text_turn("Left it as it was."),
+        ]
+    )
+    session = _session(workspace, auto_approve=False)
+    session.renderer.approval = lambda description, detail: False  # type: ignore[method-assign]
+
+    await _ask(session, gateway, "bump the return value")
+
+    assert path.read_text(encoding="utf-8") == before
+    tool_results = [
+        m for request in gateway.requests for m in request["messages"] if m["role"] == "tool"
+    ]
+    assert any("declined" in m["content"] for m in tool_results)
+
+
+async def test_an_approved_edit_is_shown_once_not_twice(workspace: Workspace) -> None:
+    """The diff in the prompt is the diff; repeating it after is noise.
+
+    Noise in an approval stream is what turns reading into reflex, which
+    defeats the point of asking at all.
+    """
+    asked: list[str] = []
+    diffs: list[str] = []
+    gateway = ScriptedGateway(
+        [
+            tool_turn("read_file", {"path": "app.py"}),
+            tool_turn(
+                "edit_file",
+                {"path": "app.py", "old_string": "return 1", "new_string": "return 2"},
+            ),
+            text_turn("Done."),
+        ]
+    )
+    session = _session(workspace, auto_approve=False)
+
+    def approval(description: str, detail: str) -> bool:
+        asked.append(detail)
+        return True
+
+    session.renderer.approval = approval  # type: ignore[method-assign]
+    session.renderer.diff = diffs.append  # type: ignore[method-assign]
+
+    await _ask(session, gateway, "bump the return value")
+
+    assert (workspace.root / "app.py").read_text(encoding="utf-8").endswith("return 2\n")
+    assert len(asked) == 1, "the edit should have been put to the user exactly once"
+    assert "+    return 2" in asked[0]
+    assert diffs == [], "the approval already showed it"
+
+
+async def test_auto_approve_still_shows_the_diff(workspace: Workspace) -> None:
+    """With --yes nobody saw a prompt, so the diff has to appear afterwards."""
+    diffs: list[str] = []
+    gateway = ScriptedGateway(
+        [
+            tool_turn("read_file", {"path": "app.py"}),
+            tool_turn(
+                "edit_file",
+                {"path": "app.py", "old_string": "return 1", "new_string": "return 2"},
+            ),
+            text_turn("Done."),
+        ]
+    )
+    session = _session(workspace, auto_approve=True)
+    session.renderer.diff = diffs.append  # type: ignore[method-assign]
+
+    await _ask(session, gateway, "bump the return value")
+
+    assert len(diffs) == 1
+    assert "+    return 2" in diffs[0]
 
 
 async def test_a_malformed_tool_call_prompts_a_retry_rather_than_hanging(
@@ -376,6 +459,42 @@ async def test_no_compaction_without_a_declared_window(workspace: Workspace) -> 
     assert len(gateway.requests[0]["messages"]) == 11
 
 
+async def test_compaction_does_not_shrink_the_saved_history(workspace: Workspace) -> None:
+    """Compaction fits the conversation into a context window. It is not a
+    decision to forget what happened - and the session file is what the user
+    resumes from. Persisting the compacted list deleted 23 turns of a real
+    session, cumulatively, one save at a time."""
+    gateway = ScriptedGateway([text_turn("ok")])
+    session = _session(workspace, context_window=1000)
+    for index in range(10):
+        session.messages.append({"role": "user", "content": f"question {index}"})
+        session.messages.append({"role": "assistant", "content": "x" * 4000})
+    session.history = list(session.messages)
+    before = len(session.history)
+
+    await _ask(session, gateway, "carry on")
+
+    # What was sent got trimmed...
+    assert len(session.messages) < before
+    # ...but nothing was thrown away.
+    assert len(session.history) > before
+    assert [m for m in session.history if m.get("content") == "question 0"]
+    assert [m for m in session.history if m.get("content") == "question 9"]
+
+
+async def test_a_resumed_session_keeps_what_it_was_given(workspace: Workspace) -> None:
+    gateway = ScriptedGateway([text_turn("ok")])
+    earlier = [
+        {"role": "user", "content": "an old question"},
+        {"role": "assistant", "content": "an old answer"},
+    ]
+    session = _session(workspace, messages=list(earlier))
+
+    await _ask(session, gateway, "a new question")
+
+    assert session.history[:2] == earlier
+
+
 # --- cancellation ----------------------------------------------------------
 
 
@@ -499,3 +618,114 @@ def _hanging_transport() -> httpx.MockTransport:
         raise AssertionError
 
     return httpx.MockTransport(handler)
+
+
+# --- getting stuck ---------------------------------------------------------
+#
+# The step cap does not catch the loop that actually happens. In a real
+# session the model sent the identical 132-line edit three times running, got
+# the same error each time, and gave up with "I'm still getting the same
+# error" - 77 edit calls in one session, none of the last few doing anything.
+
+
+def _same_bad_edit(call_id: str) -> str:
+    return tool_turn(
+        "edit_file",
+        {"path": "app.py", "old_string": "nowhere to be found", "new_string": "x"},
+        call_id=call_id,
+    )
+
+
+async def test_a_repeated_failure_is_named_rather_than_left_to_repeat(
+    workspace: Workspace,
+) -> None:
+    gateway = ScriptedGateway(
+        [
+            tool_turn("read_file", {"path": "app.py"}),
+            _same_bad_edit("call_a"),
+            _same_bad_edit("call_b"),
+            text_turn("I'll try something else."),
+        ]
+    )
+    session = _session(workspace)
+
+    await _ask(session, gateway, "change it")
+
+    results = [
+        m for request in gateway.requests for m in request["messages"] if m["role"] == "tool"
+    ]
+    escalated = [m for m in results if "made this exact call" in m["content"]]
+    assert escalated, "the second identical failure said nothing about being a repeat"
+    assert "2 times" in escalated[0]["content"]
+
+
+async def test_the_turn_is_abandoned_rather_than_looping_to_the_step_cap(
+    workspace: Workspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gateway = ScriptedGateway([tool_turn("read_file", {"path": "app.py"})])
+    gateway.script.extend(_same_bad_edit(f"call_{n}") for n in range(10))
+    session = _session(workspace)
+
+    await _ask(session, gateway, "change it")
+
+    edits = [
+        m
+        for request in gateway.requests
+        for m in request["messages"]
+        if m["role"] == "assistant"
+        for c in (m.get("tool_calls") or [])
+        if c["function"]["name"] == "edit_file"
+    ]
+    assert len(gateway.script) > 0, "the whole script was consumed - it ran to the step cap"
+    assert "stopping so you can take a look" in capsys.readouterr().out
+    assert len({m["tool_calls"][0]["id"] for m in edits}) <= _REPEAT_ABORT
+
+
+async def test_different_calls_that_fail_are_not_treated_as_a_loop(
+    workspace: Workspace,
+) -> None:
+    """A model working through several files must not be accused of looping."""
+    gateway = ScriptedGateway(
+        [
+            tool_turn("read_file", {"path": "app.py"}),
+            tool_turn("edit_file", {"path": "app.py", "old_string": "aaa", "new_string": "1"}),
+            tool_turn("edit_file", {"path": "app.py", "old_string": "bbb", "new_string": "2"}),
+            tool_turn("edit_file", {"path": "app.py", "old_string": "ccc", "new_string": "3"}),
+            tool_turn("edit_file", {"path": "app.py", "old_string": "ddd", "new_string": "4"}),
+            text_turn("Done what I could."),
+        ]
+    )
+    session = _session(workspace)
+
+    await _ask(session, gateway, "change it")
+
+    results = [
+        m for request in gateway.requests for m in request["messages"] if m["role"] == "tool"
+    ]
+    assert not any("made this exact call" in m["content"] for m in results)
+    assert gateway.script == [], "the turn was cut short"
+
+
+async def test_the_turn_stops_when_there_is_no_one_to_ask(
+    workspace: Workspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Rather than refusing every remaining call on the user's behalf."""
+    from llm_assistant_agent.render import InputUnavailableError
+
+    gateway = ScriptedGateway([tool_turn("run", {"command": "wc -l app.py"})])
+    gateway.script.extend(tool_turn("run", {"command": f"echo {n}"}) for n in range(5))
+    session = _session(workspace, auto_approve=False)
+
+    def closed(description: str, detail: str) -> bool:
+        raise InputUnavailableError("stdin is closed, so nothing can be approved")
+
+    session.renderer.approval = closed  # type: ignore[method-assign]
+
+    await _ask(session, gateway, "count the lines")
+
+    assert "cannot ask for approval" in capsys.readouterr().out
+    results = [
+        m for request in gateway.requests for m in request["messages"] if m["role"] == "tool"
+    ]
+    assert not any("declined" in m["content"] for m in results), "recorded a refusal nobody made"
+    assert len(gateway.script) > 0, "it carried on through the whole script"

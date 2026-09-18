@@ -1,7 +1,8 @@
 # `assist` — the agent CLI
 
 An agentic coding session driven by the model this repo deploys. It reads,
-searches and edits files, runs commands you approve, and checks its own work.
+searches files, proposes edits you approve as diffs, runs commands you
+approve, and checks its own work.
 
 ```bash
 make venv                      # installs `assist` into .venv
@@ -46,16 +47,19 @@ Flags win, then the environment, then `.env` in the current directory.
 | `--api-key` | `ASSIST_API_KEY`, else first entry of `API_KEYS` | Bearer token |
 | `--model` | `MODEL_ID` | Model to request |
 | `--cwd` | current directory | Workspace root |
-| `--context-window` | `0` (off) | Compact the transcript before it overflows |
+| `--context-window` | `MAX_MODEL_LEN` | Compact the transcript before it overflows |
 | `--temperature` | `0.1` | Sampling temperature |
 | `--top-p` | `0.8` | Nucleus sampling cutoff |
 | `--max-tokens` | `8192` | Ceiling on one reply; `0` defers to the gateway |
-| `--yes` | — | Approve shell commands automatically. Unattended runs only. |
+| `--yes` | — | Approve edits and commands automatically. Unattended runs only. |
 | `--allow-dirty` | — | Start with uncommitted changes already present |
 
-Set `--context-window` to the engine's `MAX_MODEL_LEN`. Without it the session
-runs until the gateway rejects it; with it, the transcript is compacted at 75%
-and the run survives.
+Compaction is on whenever a window is known, which it is by default from
+`MAX_MODEL_LEN` in the environment or `.env`. The transcript is compacted at 75%
+of it and the run survives. It used to require the flag, and a flag you have to
+remember is a flag that is not set — a session here reached 163k tokens against
+a 131k window that way, with every turn past the limit silently truncated by the
+engine. `--context-window 0` disables it deliberately.
 
 ### Why the temperature is that low
 
@@ -89,12 +93,13 @@ leave it low when you want it to edit code.
 | `list_files` | Orient in an unfamiliar tree, optionally by glob |
 | `grep` | Regex over file contents, with line numbers |
 | `read_file` | Read a text file — **required before editing it** |
-| `edit_file` | Replace an exact, unique snippet |
-| `write_file` | Create a file, or replace one wholesale |
+| `read_document` | Inspect a PDF, CSV/TSV or spreadsheet. Read-only |
+| `edit_file` | Replace an exact, unique snippet. **You approve the diff** |
+| `write_file` | Create a file, or replace one wholesale. **You approve the diff** |
 | `git_diff` | Review its own uncommitted changes. Read-only |
 | `run` | Shell command, **approved by you each time** |
 
-Seven tools, deliberately. Every tool costs prompt tokens on every turn of the
+Eight tools, deliberately. Every tool costs prompt tokens on every turn of the
 loop and adds another way for the model to go wrong.
 
 `git_diff` earns its place because without it the model cannot see its own work
@@ -103,6 +108,64 @@ prompt for something read-only, and the end-of-turn `diff --stat` goes to *you*,
 never into the transcript. So a multi-file change was written blind, one edit at
 a time. The system prompt now asks for a review pass before the final answer,
 which is where a leftover import or an edit in the wrong place gets caught.
+
+## Showing it a document to write a parser for
+
+The model is text-only — it cannot be shown a PDF. But what it needs in order
+to *write a parser* for one is not the pixels and not really the text: it is
+the shape. `read_document` returns that.
+
+```
+⏺ read_document  statement.pdf
+```
+```
+statement.pdf - PDF, 1 page
+
+page 1: 29 words
+  text columns start at x: 57 (5 rows), 150 (5 rows), 330 (4 rows),
+                           399 (2 rows), 471 (5 rows)
+    Date Description Debit Credit Balance
+    01/09/2026 TESCO STORES 3345 42.10 1203.55
+    02/09/2026 TFL TRAVEL CHARGE 8.40 1195.15
+```
+
+Thirty lines instead of several thousand tokens of extracted text — and more
+useful, because dumped text loses the column geometry, which is exactly what
+differs between one bank's layout and the next. Rows appear verbatim, so the
+model can match against real strings rather than a paraphrase.
+
+Two details earn their place. Ruled tables are reported as tables; a statement
+laid out with whitespace has no table at all, and then the **x-positions are
+the only signal** a parser has. And each position carries its occupancy: a
+`Credit` column with two entries in the sample is still a column the parser
+must handle, so it is listed rather than dropped as noise.
+
+`full=true` returns the extracted text instead, for when the content matters
+more than the shape. Documents are never marked as read-for-editing — a digest
+is not the file's contents, and an edit built from one would be built from a
+summary.
+
+| | |
+| --- | --- |
+| PDF | pages, ruled tables, column positions, sample rows |
+| CSV / TSV | delimiter, column names, guessed types, row count, sample rows |
+| XLSX / XLSM | every sheet, its dimensions, header and sample rows |
+
+### It needs an optional extra
+
+```bash
+pip install 'llm-assistant-api[documents]'
+```
+
+An extra rather than a dependency: this package is also the gateway, whose
+image `config.py` deliberately keeps small, and `pdfplumber` brings
+`pdfminer.six` and Pillow with it. Without it the tool returns an instruction
+to install it, as a tool result, so the model tells you rather than failing
+mid-turn. CSV and TSV need nothing.
+
+Note this runs on the host, like `read_file` — it is how the *agent* reads the
+document. Code the agent then writes to parse PDFs is your project's own
+dependency, installed inside the sandbox with `make venv` as usual.
 
 ## Checking edits as they land
 
@@ -155,13 +218,39 @@ rather than as a problem with it, and one that hangs is dropped after 30s.
   hallucinated recollection of the file.
 
 Fuzzy matching trades a loud, recoverable failure for a silent wrong edit, and
-a silent wrong edit in a multi-file change is expensive to find. The near-miss
-case gets a specific hint, because it is nearly always indentation:
+a silent wrong edit in a multi-file change is expensive to find.
+
+Which makes the failure message load-bearing, and "not found" on its own is
+close to useless: for a long anchor it could be a stray space on line two or a
+block that was never in the file, and those need opposite corrections. So a
+miss is diagnosed. Measured over real sessions, anchors that applied ran to a
+median of 24 lines; the ones that failed, 139 — the model reconstructs a long
+block from memory and gets most of it right:
 
 ```
-✗ old_string was not found in the file. A block matching this text apart from
-  whitespace does exist - the difference is almost certainly indentation.
+✗ old_string was not found in the file. It matches the file from line 61 for
+  30 lines, then differs:
+    you sent:      # Validate user ID (only allow predefined users)
+    the file has:  # Verify user is the default user
+  Fix that line, or anchor on a shorter run of lines around the change.
+  You have written this file since you last read it, so it no longer says what
+  you remember. Call read_file before editing it again.
+  old_string is 174 lines. edit_file needs a byte-exact copy, and that much
+  text reproduced from memory almost never is one. Anchor on the few lines
+  that actually change, or use write_file to replace the file whole.
 ```
+
+Four separate hints, each fired by a condition: near-miss on whitespace only;
+the first line that diverges, with what the file has there instead; an anchor
+whose first line is nowhere in the file at all, which means it was never
+copied from one; and an anchor long enough that byte-exact recall was never
+realistic.
+
+That third case is worth its own note. `write_file` marks a file *seen*, so
+read-before-edit is satisfied and the model carries on editing from its
+recollection of what it wrote — which is a confirmation, not the text. The
+workspace tracks files written since they were last read for exactly this, so
+the error can say so rather than leave it to be worked out.
 
 The diff you see is computed from the file before and after, never from the
 model's description of what it did.
@@ -171,11 +260,12 @@ model's description of what it did.
 | | |
 | --- | --- |
 | Path escapes | Every path is resolved and must be inside the workspace |
+| Edits | Every edit prompts, showing the diff it would make, before it lands |
 | Undo | Git. A clean tree is required unless you pass `--allow-dirty` |
 | Shell | Every command prompts, showing the exact command — and where it will run |
 | Shell isolation | `--sandbox` runs commands in a container with only the workspace mounted and no network. Off by default |
 | Commits | The system prompt forbids `git commit`/`push` — this repo's releases are driven by commit messages, so an agent writing them would mint bogus versions |
-| Runaway loops | Hard cap of 40 steps per message |
+| Runaway loops | Hard cap of 40 steps per message, and a turn is abandoned after the same call fails 4 times running |
 | A turn going nowhere | Ctrl-C cancels it and keeps the session |
 
 ## Interrupting a turn
@@ -218,6 +308,137 @@ the *N* results answering it. That transcript is not merely untidy — every
 rejected and you would have kept a history you could not use. `Session` closes
 the gap on the way out, with a result saying the tool never ran.
 
+## Answering the approval prompt
+
+Two things had to be got right before an approval could be trusted, and both
+were found the same way: a session in which seven consecutive commands were
+recorded as "declined by the user", `wc -l` among them.
+
+**What was typed before the question is discarded.** A turn is mostly waiting,
+and people type into the gap — a stray Enter, the first characters of the next
+instruction. Those keystrokes sit in the terminal's buffer and are read by the
+very next `input()`. A bare Enter reads as "no" under `[y/N]`, so an approval
+nobody saw is refused and the transcript records a decision the user never
+made. The buffer is flushed immediately before the question is asked, so an
+answer can only be a keypress made while the question was on screen.
+
+**No stdin is not a refusal.** On EOF the prompt used to return `False`, which
+is indistinguishable from a considered "no": the model apologises, tries
+something else, and every later approval refuses the same way, silently,
+forever. It now raises, and the turn stops with
+
+```
+error: cannot ask for approval: stdin is closed, so nothing can be approved
+```
+
+which is recoverable, unlike a session full of refusals that have to be
+reverse-engineered afterwards.
+
+## Getting stuck
+
+The step cap catches a model that keeps busy. It does not catch the loop that
+actually happens, which is the same failing call over and over. From one real
+session: 77 `edit_file` calls, ten of them sending `old_string` and
+`new_string` identical, the last three the same 132-line block in a row — then
+"I'm still getting the same error. Let me approach this differently", and
+nothing different.
+
+Two things were missing. The first is that the error said only what had
+happened, not what it meant:
+
+```
+✗ old_string and new_string are identical, so this edit is a no-op.
+```
+
+Sending the same text twice means one of two opposite things, so the file has
+to be consulted before saying anything. Over one real session there were 16 of
+them, and in 14 the text was **already in the file**: the model had made the
+change several turns earlier, lost track of it, and proposed it again from its
+plan rather than from the file it had just read. The right thing to say there
+is that the work is done:
+
+```
+✗ old_string and new_string are identical, and the file already reads exactly
+  like this - so this change has already been applied. There is nothing to do
+  here. Call git_diff if you are unsure what has landed, and move on.
+```
+
+The other two had neither string in the file — both fields held the wanted
+result rather than the current text — and get told that instead. An earlier
+version of this message advised sending "a new_string that is actually
+different", which is the wrong instruction for fourteen cases out of sixteen:
+it invites the model to invent a change to code that is already correct.
+
+The second is that nothing counted. Failures are now tallied by tool name
+*and* arguments — a model working steadily through several files is not
+looping, one resending a byte-identical failing call is. The second such call
+is told so plainly, and the fourth ends the turn:
+
+```
+! edit_file failed the same way 4 times running - stopping so you can take a look.
+```
+
+Better than burning thirty more steps and handing back a session that has to
+be read to find out nothing happened.
+
+## Knowing it is still alive
+
+A turn is mostly silence. Prefill over a full context window is tens of
+seconds before the first token, and a test suite behind `run` can be minutes —
+during which an agent that is working and an agent that has hung look exactly
+alike. That resemblance is what makes people reach for Ctrl-C.
+
+So the stretches with no output carry a spinner: `thinking` while waiting on
+the model, `running` while a command is out at a worker thread, `checking`
+while the linters go over an edit. Past three seconds it starts counting, on
+the grounds that "waiting" and "hung" are only distinguishable by a number
+that keeps moving.
+
+It draws nothing for the first 0.4s, so the tools that return immediately do
+not flash a frame on the way past, and nothing at all when stdout is not a
+terminal — redraw sequences belong in a terminal, not in a log file or a
+captured test stream.
+
+It also has to come back within a single turn. Qwen3-Coder narrates before it
+acts — in a real session, 97 turns out of 130 carried prose *and* tool calls —
+so a spinner that merely stopped at the first token would disappear exactly
+before the quietest stretch of the turn: the arguments of a whole-file write,
+streaming one fragment at a time with nothing printed. The client reports tool
+fragments as they arrive, and the spinner resumes on a line of its own below
+the prose.
+
+Whoever is about to print stops it first, and `stop()` erases the line there
+and then rather than leaving it to the animating task. Both run on the one
+event-loop thread, so the task can only take control at an `await` and cannot
+be caught halfway through a write. That is what lets the first streamed token
+clear the spinner and take the line it was using.
+
+## Approving edits
+
+Every `edit_file` and `write_file` is put to you as the diff it would make,
+before it lands. Naming only the file would leave you nothing to answer with
+but trust in the model, and misplaced trust is the failure this exists to
+catch: an edit that applies cleanly, passes the linter and is quietly wrong.
+
+The preview is built by applying the edit in memory and diffing the result, so
+what you approve is what gets written — not the model's description of it.
+Three cases are never put to you, because there is nothing to decide: an edit
+whose `old_string` does not match, one that changes nothing, and one against a
+file the model has not read. All three fail in `invoke` with a message that
+says why, and asking first would only be a question about an edit that is not
+going to happen.
+
+That last case matters more than it looks. The preview reads the file
+directly rather than through `workspace.read`, which records files as *seen*.
+Routing it through there would satisfy the read-before-edit rule on the
+model's behalf, by way of a prompt the model never had to answer — the rule
+would be discharged by the machinery that exists to enforce it.
+
+Approving shows the diff once, not twice: the prompt is where you read it, and
+reprinting it on acceptance is the kind of noise that turns approvals into
+reflex. Under `--yes` nobody saw a prompt, so the diff is printed after the
+edit instead.
+
 ## A session
 
 ```
@@ -228,10 +449,17 @@ $ assist "make prepare_payload apply the cap to max_completion_tokens too"
 ⏺ grep  prepare_payload
 ⏺ read_file  src/llm_assistant_api/proxy.py
 ⏺ edit_file  src/llm_assistant_api/proxy.py
-  @@ -117,7 +117,7 @@
-  -        for field in ("max_tokens",):
-  +        for field in ("max_tokens", "max_completion_tokens"):
+
+? Edit src/llm_assistant_api/proxy.py
+    @@ -117,7 +117,7 @@
+    -        for field in ("max_tokens",):
+    +        for field in ("max_tokens", "max_completion_tokens"):
+  Proceed? [y/N] y
 ⏺ run  make test
+
+? Run a shell command on this machine
+    make test
+  Proceed? [y/N] y
   ............................ 161 passed
 
 Applied the cap to both fields; the tests still pass.
@@ -303,6 +531,37 @@ rebase — but it is worth seeing before the model acts on what it thinks it
 knows.
 
 Sessions are pruned to the most recent 100.
+
+What is saved is the **whole** conversation, not the compacted one. Compaction
+trims what gets *sent* so it fits the context window; it is not a decision to
+forget what happened. Saving the trimmed list instead makes every compaction a
+permanent deletion, and a cumulative one — a session here went from 23 user
+turns to 2 that way, one save at a time, with no way back. `Session.messages`
+is what the model sees; `Session.history` is what happened, and the store gets
+the latter.
+
+## Matching the sandbox to the project
+
+The sandbox image defaults to the same Python as the gateway, which is not
+necessarily the one the project targets. A project pinning 2023-era
+dependencies has no wheels built for a 2025 interpreter, so pip falls back to
+building from source — and `pydantic-core` from source wants a Rust toolchain
+that is deliberately not in the image:
+
+```
+ERROR: Failed building wheel for pydantic-core
+```
+
+That reads like a broken sandbox and is really a version mismatch. Build one
+that matches:
+
+```bash
+make sandbox-image SANDBOX_PYTHON=3.11
+```
+
+Or point `--sandbox-image` at any image you already have. Rust is left out on
+purpose — it would roughly double the image for something most projects never
+need.
 
 ## Running shell commands in a container
 

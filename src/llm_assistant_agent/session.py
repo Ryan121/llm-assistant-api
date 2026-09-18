@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,7 +23,7 @@ import httpx
 
 from .checks import Checks
 from .client import AssistantTurn, ChatClient, ToolCall, TurnError
-from .render import Renderer
+from .render import InputUnavailableError, Progress, Renderer
 from .sandbox import HostSandbox, Sandbox
 from .tools import DECLINED, TOOL_SCHEMAS, ToolBox, ToolOutcome
 from .workspace import Workspace
@@ -44,6 +45,10 @@ How to work:
   the run tool if there is an obvious command for it.
 - If a tool returns an error, read it and correct course - the message says
   what to do differently.
+- Never write code that parses a file you have not looked at. Call
+  read_document on the actual PDF, CSV or spreadsheet first and write the
+  parser against what it shows you. Code written from a guess at the format
+  runs, returns nothing, and looks finished.
 - Editing a file may report problems found in it afterwards. Those are real -
   fix them before moving on, rather than leaving the file worse than you found
   it.
@@ -51,15 +56,30 @@ How to work:
   that were each right on their own can still be wrong together: a leftover
   import, a helper you stopped using, an edit landed in the wrong place.
 
-Your edits go into the user's working tree uncommitted, so they will review a
-diff afterwards. Never run git commit, git push, or any other command that
+The user approves each edit as a diff before it lands, so keep them small and
+self-explanatory. Never run git commit, git push, or any other command that
 rewrites history or publishes work; the user does that themselves.
+
+Never throw uncommitted work away either - no git checkout, restore, reset,
+stash or clean of a file you did not create in this session. The working tree
+holds the user's own changes and whatever an earlier session left behind, so a
+diff will show more than you remember doing. That is normal and not yours to
+undo: an uncommitted change is the only copy there is.
 
 Be brief. Explain what you changed and why, not what you are about to do."""
 
 #: Stop a loop that is going nowhere. Generous enough for a real multi-file
 #: change, small enough that a stuck model does not run for an hour.
 _MAX_STEPS = 40
+
+#: A step cap alone does not catch the loop that actually happens, which is
+#: the same failing call over and over - in one real session, the identical
+#: 132-line edit three times running, then "I'm still getting the same error".
+#: Told plainly on the second, abandoned on the fourth, because a fourth
+#: identical call has no more chance than the third and the user is better off
+#: with the turn back.
+_REPEAT_WARN = 2
+_REPEAT_ABORT = 4
 
 #: Compact when the transcript passes this share of the context window.
 _COMPACT_AT = 0.75
@@ -73,10 +93,70 @@ def _estimate_tokens(messages: list[dict[str, Any]]) -> int:
     return int(characters / _CHARS_PER_TOKEN)
 
 
+#: What the spinner says while a tool runs. Only the slow ones are worth
+#: naming; the rest finish inside the spinner's own start-up delay.
+_WORKING_LABELS = {
+    "run": "running",
+    "grep": "searching",
+    "list_files": "listing files",
+    "read_document": "reading document",
+    "git_diff": "diffing",
+}
+
+
+def _working_label(name: str) -> str:
+    # Edits are the slow ones only because of the checkers that follow them,
+    # which is what the user is actually waiting for.
+    if name in {"edit_file", "write_file"}:
+        return "checking"
+    return _WORKING_LABELS.get(name, "working")
+
+
+class _Stream:
+    """Sends one turn's streamed text to the renderer, and runs the spinner.
+
+    An object rather than a closure because the loop it belongs to runs many
+    turns, and a closure over a per-iteration spinner is the classic late
+    binding bug waiting to happen.
+
+    The spinner has to stop and start again within a single turn. Qwen3-Coder
+    narrates before it acts - in a real session, 97 turns in 130 carried prose
+    *and* tool calls - so a spinner that simply stopped at the first token
+    would disappear just before the longest silence of the turn: the arguments
+    of a whole-file write, streaming one fragment at a time with nothing
+    printed. Resuming on the first tool fragment covers that.
+    """
+
+    def __init__(self, renderer: Renderer, waiting: Progress) -> None:
+        self._renderer = renderer
+        self._waiting = waiting
+        self.wrote = False
+        #: Prose has been closed off with a newline and the spinner restarted
+        #: below it, so the caller must not end the line a second time.
+        self.resumed = False
+
+    def __call__(self, chunk: str) -> None:
+        # Before the first character, not after: the spinner and the reply
+        # share a line, and whoever writes second wins it.
+        self._waiting.stop()
+        self.wrote = True
+        self._renderer.text_delta(chunk)
+
+    def tool_delta(self) -> None:
+        if not self.wrote or self.resumed:
+            return  # never wrote, so the spinner is still up, or already back
+        # The prose owns the line it stopped on; the spinner needs its own.
+        self._renderer.end_text()
+        self.resumed = True
+        self._waiting.start()
+
+
 def _summarise_arguments(name: str, arguments: dict[str, Any]) -> str:
     """One line describing a tool call, for the transcript the user watches."""
     if name in {"read_file", "edit_file", "write_file"}:
         return str(arguments.get("path", ""))
+    if name == "read_document":
+        return str(arguments.get("path", "")) + (" (full text)" if arguments.get("full") else "")
     if name == "grep":
         pattern = str(arguments.get("pattern", ""))
         glob = arguments.get("glob")
@@ -102,8 +182,17 @@ class Session:
     auto_approve: bool = False
     checks: Checks = field(default_factory=Checks)
     sandbox: Sandbox = field(default_factory=HostSandbox)
+    #: What is sent to the model. Compaction rewrites this.
     messages: list[dict[str, Any]] = field(default_factory=list)
+    #: Everything that was actually said, in order, never compacted. Compaction
+    #: is a way of fitting a conversation into a context window; it is not a
+    #: decision to forget what happened, and persisting the compacted list
+    #: destroyed 23 turns of a real session before this existed. Save this.
+    history: list[dict[str, Any]] = field(default_factory=list, init=False)
     _rules_sent: bool = field(default=False, init=False)
+    _reported_broken: list[bool] = field(default_factory=list, init=False)
+    #: How many times each tool call has failed, keyed by name and arguments.
+    _failures: Counter[str] = field(default_factory=Counter, init=False)
 
     def __post_init__(self) -> None:
         # The rules open the first user turn rather than sitting in a system
@@ -114,12 +203,22 @@ class Session:
         # system message is fine; this one is not, and telling the model to
         # emit the wrapper does not fix it.
         self._rules_sent = bool(self.messages)
+        # A resumed session starts with the whole of what it was given; from
+        # here the two diverge only when compaction trims what is sent.
+        self.history = list(self.messages)
+
+    def _say(self, message: dict[str, Any]) -> None:
+        """Add a message to both the working set and the archive."""
+        self.messages.append(message)
+        self.history.append(message)
 
     # --- approval ---------------------------------------------------------
 
     def approve(self, description: str, detail: str) -> bool:
         if self.auto_approve:
-            self.renderer.note(f"{description}: {detail}")
+            # A one-line note for a command; for an edit the detail is a diff,
+            # which is shown properly once the edit has landed.
+            self.renderer.note(description if "\n" in detail else f"{description}: {detail}")
             return True
         return self.renderer.approval(description, detail)
 
@@ -146,31 +245,35 @@ class Session:
         if not self._rules_sent:
             user_message = f"{SYSTEM_PROMPT}\n\n---\n\n{user_message}"
             self._rules_sent = True
-        self.messages.append({"role": "user", "content": user_message})
+        self._say({"role": "user", "content": user_message})
         toolbox = ToolBox(self.workspace, self.approve, self.checks, self.sandbox)
 
         for _ in range(_MAX_STEPS):
             self._compact_if_needed()
 
-            wrote_text = False
-
-            def on_text(chunk: str) -> None:
-                nonlocal wrote_text
-                wrote_text = True
-                self.renderer.text_delta(chunk)
+            # The wait before the first token is the longest silence in a turn
+            # - prefill over a full context window is tens of seconds - and it
+            # looks exactly like a hang.
+            waiting = self.renderer.working("thinking")
+            stream = _Stream(self.renderer, waiting)
 
             try:
-                turn, raw_calls = await self.client.turn(
-                    http, self.messages, TOOL_SCHEMAS, on_text=on_text
-                )
+                async with waiting:
+                    turn, raw_calls = await self.client.turn(
+                        http,
+                        self.messages,
+                        TOOL_SCHEMAS,
+                        on_text=stream,
+                        on_tool_delta=stream.tool_delta,
+                    )
             except TurnError as exc:
                 self.renderer.error(str(exc))
                 return
 
-            if wrote_text:
+            if stream.wrote and not stream.resumed:
                 self.renderer.end_text()
 
-            self.messages.append(turn.as_message(raw_calls))
+            self._say(turn.as_message(raw_calls))
 
             for problem in turn.malformed:
                 self.renderer.tool_error(problem)
@@ -179,7 +282,7 @@ class Session:
                 if turn.malformed:
                     # Nothing ran, but the model thinks it called something.
                     # Tell it so, rather than leaving the turn dangling.
-                    self.messages.append(
+                    self._say(
                         {
                             "role": "user",
                             "content": (
@@ -193,12 +296,43 @@ class Session:
                 self._finish_turn()
                 return
 
-            await self._execute(toolbox, turn)
+            if not await self._execute(toolbox, turn):
+                self._finish_turn()
+                return
 
         self.renderer.warn(f"Stopped after {_MAX_STEPS} steps without a final answer.")
         self._finish_turn()
 
-    async def _execute(self, toolbox: ToolBox, turn: AssistantTurn) -> None:
+    def _repetition(self, call: ToolCall, outcome: ToolOutcome) -> tuple[str, bool]:
+        """Note a repeated failure, and say what to tell the model about it.
+
+        Returns the text to append to the tool result and whether the turn
+        should be abandoned. Keyed on the arguments as well as the name, so a
+        model working steadily through several files is not accused of
+        looping, while one resending a byte-identical failing call is.
+        """
+        if not outcome.is_error:
+            return "", False
+        signature = f"{call.name}:{json.dumps(call.arguments, sort_keys=True, default=str)}"
+        self._failures[signature] += 1
+        count = self._failures[signature]
+        if count < _REPEAT_WARN:
+            return "", False
+        if count >= _REPEAT_ABORT:
+            return (
+                f"\n\nThis identical call has now failed {count} times. Stopping here.",
+                True,
+            )
+        return (
+            f"\n\nYou have made this exact call {count} times and it has failed the same "
+            "way each time; it will not behave differently on the next. Do something "
+            "else: read the file as it is now, try a smaller change, or say what is "
+            "blocking you.",
+            False,
+        )
+
+    async def _execute(self, toolbox: ToolBox, turn: AssistantTurn) -> bool:
+        """Run this turn's tool calls. False means the turn should stop."""
         for call in turn.tool_calls:
             self.renderer.tool_call(call.name, _summarise_arguments(call.name, call.arguments))
 
@@ -206,28 +340,56 @@ class Session:
             # thread below: a prompt blocked on stdin in a thread cannot be
             # cancelled, and would carry on reading after the turn is gone.
             request = toolbox.approval_for(call.name, call.arguments)
-            if request is not None and not self.approve(*request):
-                self.renderer.tool_error("declined by the user")
-                self._record(call, DECLINED)
-                continue
+            seen_diff = False
+            if request is not None:
+                try:
+                    approved = self.approve(*request)
+                except InputUnavailableError as exc:
+                    # Nothing can be authorised from here, and answering "no"
+                    # to each remaining call in turn would only fill the
+                    # transcript with refusals the user never made.
+                    self.renderer.error(f"cannot ask for approval: {exc}")
+                    self._record(call, "The user could not be asked, so this did not run.")
+                    return False
+                if not approved:
+                    self.renderer.tool_error("declined by the user")
+                    self._record(call, DECLINED)
+                    continue
+                # The user has just read this edit in the prompt. Printing the
+                # same diff again the moment they approve it is noise, and
+                # noise is what stops approvals being read.
+                seen_diff = not self.auto_approve and "\n" in request[1]
 
             # In a thread so that a long command - a test suite, a build - does
             # not hold the event loop, which is what makes Ctrl-C during one
-            # do nothing at all.
-            outcome = await asyncio.to_thread(
-                toolbox.invoke, call.name, call.arguments, approved=True
-            )
-            self._report(call, outcome)
-            self._record(call, outcome.content)
+            # do nothing at all. The spinner is the other half of that: the
+            # loop stays responsive, and now it also looks it.
+            async with self.renderer.working(_working_label(call.name)):
+                outcome = await asyncio.to_thread(
+                    toolbox.invoke, call.name, call.arguments, approved=True
+                )
+            self._report(call, outcome, repeat_diff=not seen_diff)
+            escalation, give_up = self._repetition(call, outcome)
+            self._record(call, outcome.content + escalation)
+            if give_up:
+                self.renderer.warn(
+                    f"{call.name} failed the same way {_REPEAT_ABORT} times running - "
+                    "stopping so you can take a look."
+                )
+                return False
+        return True
 
     def _record(self, call: ToolCall, content: str) -> None:
-        self.messages.append({"role": "tool", "tool_call_id": call.id, "content": content})
+        self._say({"role": "tool", "tool_call_id": call.id, "content": content})
 
-    def _report(self, call: ToolCall, outcome: ToolOutcome) -> None:
+    def _report(self, call: ToolCall, outcome: ToolOutcome, *, repeat_diff: bool = True) -> None:
         if outcome.is_error:
-            self.renderer.tool_error(outcome.content.splitlines()[0] if outcome.content else "")
+            # The whole message. The renderer decides how much of it fits;
+            # taking the first line here threw away every part that said what
+            # to do about it, including the repeat warning.
+            self.renderer.tool_error(outcome.content)
             return
-        if outcome.diff:
+        if outcome.diff and repeat_diff:
             self.renderer.diff(outcome.diff)
         elif call.name == "run":
             for line in outcome.content.splitlines()[:20]:
@@ -236,6 +398,11 @@ class Session:
         # rather than only the retry it prompts.
         for line in (outcome.findings or "").splitlines():
             self.renderer.tool_error(line)
+        # A checker that turned out not to run is the user's problem to fix,
+        # not the model's to be told about.
+        while len(self._reported_broken) < len(self.checks.broken):
+            self.renderer.warn(self.checks.broken[len(self._reported_broken)])
+            self._reported_broken.append(True)
 
     # --- cancellation -----------------------------------------------------
 
@@ -253,7 +420,7 @@ class Session:
         """
         open_calls = self._unanswered_tool_calls()
         for call_id in open_calls:
-            self.messages.append(
+            self._say(
                 {
                     "role": "tool",
                     "tool_call_id": call_id,

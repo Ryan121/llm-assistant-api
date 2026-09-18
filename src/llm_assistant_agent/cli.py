@@ -53,8 +53,9 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def _settings(args: argparse.Namespace) -> tuple[str, str, str]:
-    """Resolve base URL, API key and model from flags, environment, then .env."""
+def _settings(args: argparse.Namespace) -> tuple[str, str, str, int]:
+    """Resolve base URL, API key, model and context window from flags, then the
+    environment, then ``.env``."""
     env_file = _read_env_file(Path(args.env_file).expanduser())
 
     def pick(flag: str | None, *names: str, default: str = "") -> str:
@@ -70,7 +71,18 @@ def _settings(args: argparse.Namespace) -> tuple[str, str, str]:
     base_url = pick(args.base_url, "ASSIST_BASE_URL", default=f"http://127.0.0.1:{port}/v1")
     api_key = pick(args.api_key, "ASSIST_API_KEY", "API_KEYS").split(",")[0].strip()
     model = pick(args.model, "MODEL_ID", default="")
-    return base_url, api_key, model
+
+    # Compaction defaults on. It used to need --context-window, and a flag you
+    # have to remember is a flag that is not set: a long session then runs
+    # straight past the engine's window - 163k tokens against a 131k limit, in
+    # the one that prompted this - and every turn after that is the model
+    # working from a prompt the engine has had to truncate.
+    if args.context_window:
+        window = args.context_window
+    else:
+        declared = pick(None, "ASSIST_CONTEXT_WINDOW", "MAX_MODEL_LEN", default="")
+        window = int(declared) if declared.isdigit() else 0
+    return base_url, api_key, model, window
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -88,7 +100,9 @@ def _parser() -> argparse.ArgumentParser:
         "--context-window",
         type=int,
         default=0,
-        help="Engine --max-model-len, used to compact the transcript before it overflows",
+        help="Engine --max-model-len, used to compact the transcript before it "
+        "overflows. Defaults to MAX_MODEL_LEN from the environment or .env; 0 "
+        "anywhere disables compaction.",
     )
     parser.add_argument(
         "--temperature",
@@ -398,7 +412,7 @@ async def _run(args: argparse.Namespace) -> int:
     if not stored and not _check_tree(workspace, renderer, args.allow_dirty):
         return 1
 
-    base_url, api_key, model = _settings(args)
+    base_url, api_key, model, context_window = _settings(args)
     if not model:
         renderer.error("No model configured. Pass --model or set MODEL_ID in .env.")
         return 1
@@ -428,7 +442,7 @@ async def _run(args: argparse.Namespace) -> int:
         ),
         workspace=workspace,
         renderer=renderer,
-        context_window=args.context_window,
+        context_window=context_window,
         auto_approve=args.yes,
         checks=_checks(args),
         sandbox=sandbox,
@@ -441,13 +455,22 @@ async def _run(args: argparse.Namespace) -> int:
         if args.no_save:
             return
         try:
-            store.save(session_id, workspace=workspace, model=model, messages=session.messages)
+            # session.history, not session.messages: compaction trims what is
+            # sent to fit the context window, and saving the trimmed list makes
+            # that a permanent, cumulative deletion of the conversation.
+            store.save(session_id, workspace=workspace, model=model, messages=session.history)
         except OSError as exc:
             # Losing the transcript is bad; losing the session over it is worse.
             renderer.warn(f"could not save the session: {exc}")
 
     renderer.note(f"{model} via {base_url}")
     renderer.note(f"workspace {workspace.root}")
+    if context_window:
+        renderer.note(
+            f"compacting at {int(context_window * 0.75) // 1000}k of {context_window // 1000}k"
+        )
+    else:
+        renderer.warn("no context window known - the transcript will not be compacted")
     if ready:
         renderer.note(ready)
     for check in session.checks.checks:

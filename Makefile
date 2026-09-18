@@ -237,10 +237,15 @@ vscode-install: ## Write ~/.continue/config.yaml (backs up any existing file)
 ## --- Agent sandbox ---------------------------------------------------------
 
 SANDBOX_IMAGE ?= assist-sandbox:latest
+# Match the project the agent will work on, not this one: old pins have no
+# wheels for a new interpreter and fall back to building from source.
+SANDBOX_PYTHON ?= 3.13
 
 .PHONY: sandbox-image
-sandbox-image: ## Build the container the agent's `run` tool executes in
-	@docker build -f docker/sandbox.Dockerfile -t $(SANDBOX_IMAGE) .
+sandbox-image: ## Build the agent's `run` container (SANDBOX_PYTHON=3.11 to match a project)
+	@docker build -f docker/sandbox.Dockerfile \
+	  --build-arg PYTHON_VERSION=$(SANDBOX_PYTHON) \
+	  -t $(SANDBOX_IMAGE) .
 
 .PHONY: sandbox-status
 sandbox-status: ## Show the agent sandbox containers and what they are costing

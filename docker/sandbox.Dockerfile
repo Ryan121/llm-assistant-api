@@ -10,7 +10,16 @@
 # Kept deliberately close to the deployment: the same Python as the gateway, so
 # a test run in here means what it says on the host.
 
-FROM python:3.13-slim
+# The Python the *project* targets, which is not necessarily the one the
+# gateway runs. A project pinning 2023-era dependencies has no wheels built for
+# a 2025 interpreter, so pip falls back to building from source - and a
+# pydantic-core sdist wants a Rust toolchain that is not in here, which is a
+# confusing way to discover the versions do not line up. Match the project:
+#
+#     make sandbox-image PYTHON_VERSION=3.11
+#
+ARG PYTHON_VERSION=3.13
+FROM python:${PYTHON_VERSION}-slim
 
 # git, because the agent reads its own diff; the compilers, because a wheel
 # without a manylinux build will otherwise fail to install and the agent will

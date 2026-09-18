@@ -54,7 +54,7 @@ def test_only_the_first_api_key_is_used(tmp_path: Path) -> None:
     env.write_text("API_KEYS=sk-one,sk-two\nMODEL_ID=m\nAPI_PORT=9999\n", encoding="utf-8")
     args = _parser().parse_args(["--env-file", str(env)])
 
-    base_url, api_key, model = _settings(args)
+    base_url, api_key, model, _ = _settings(args)
 
     assert api_key == "sk-one"
     assert model == "m"
@@ -68,10 +68,45 @@ def test_flags_beat_the_env_file(tmp_path: Path) -> None:
         ["--env-file", str(env), "--model", "from-flag", "--base-url", "http://x/v1"]
     )
 
-    base_url, _, model = _settings(args)
+    base_url, _, model, _window = _settings(args)
 
     assert model == "from-flag"
     assert base_url == "http://x/v1"
+
+
+# --- compaction is on by default -------------------------------------------
+
+
+def test_the_context_window_comes_from_the_engine_setting(tmp_path: Path) -> None:
+    """It used to need --context-window, and a flag you have to remember is a
+    flag that is not set - the transcript then runs past the engine's window."""
+    env = tmp_path / ".env"
+    env.write_text("MODEL_ID=m\nMAX_MODEL_LEN=131072\n", encoding="utf-8")
+    args = _parser().parse_args(["--env-file", str(env)])
+
+    *_, window = _settings(args)
+
+    assert window == 131072
+
+
+def test_the_flag_still_wins(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("MODEL_ID=m\nMAX_MODEL_LEN=131072\n", encoding="utf-8")
+    args = _parser().parse_args(["--env-file", str(env), "--context-window", "8192"])
+
+    *_, window = _settings(args)
+
+    assert window == 8192
+
+
+def test_no_declared_window_leaves_compaction_off(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    env.write_text("MODEL_ID=m\n", encoding="utf-8")
+    args = _parser().parse_args(["--env-file", str(env)])
+
+    *_, window = _settings(args)
+
+    assert window == 0
 
 
 # --- start-up guards -------------------------------------------------------

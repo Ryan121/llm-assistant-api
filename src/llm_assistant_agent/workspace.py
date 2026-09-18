@@ -53,13 +53,28 @@ class Workspace:
     root: Path
     #: Files read this session. An edit to anything not in here is refused.
     seen: set[Path] = field(default_factory=set)
+    #: Files written since they were last read, so the model is working from
+    #: its own recollection of what it wrote rather than from the file.
+    written_since_read: set[Path] = field(default_factory=set)
+    #: Everything written this session, never cleared. Unlike the set above
+    #: this answers "is this change mine?", which a reader of the diff needs.
+    written: set[Path] = field(default_factory=set)
+    #: Files that already had uncommitted changes when the session opened, so
+    #: the diff can say which part of itself is not the agent's work. Without
+    #: this the model reads the working tree as a record of what it did: in a
+    #: real session it saw 1326 changed lines in a template it had not touched
+    #: - left there by the session before it - decided they "weren't part of my
+    #: intended changes", and tried three times to git checkout the user's work.
+    baseline_dirty: frozenset[str] = frozenset()
 
     @classmethod
     def open(cls, root: Path) -> Workspace:
         resolved = root.resolve()
         if not resolved.is_dir():
             raise WorkspaceError(f"{root} is not a directory")
-        return cls(root=resolved)
+        workspace = cls(root=resolved)
+        workspace.baseline_dirty = workspace._dirty_paths()
+        return workspace
 
     # --- path handling ----------------------------------------------------
 
@@ -81,7 +96,15 @@ class Workspace:
 
     # --- reading ----------------------------------------------------------
 
-    def read(self, path: str) -> str:
+    def read(self, path: str, *, partial: bool = False) -> str:
+        """The file's text, and a note that it has been seen.
+
+        ``partial`` says the caller is only going to show part of what comes
+        back. That still counts as having read the file, but it must not clear
+        the "you have written this since you read it" flag: reading ten lines
+        at the top says nothing about the edit made at line 500, and clearing
+        the flag there would lose the one hint that explains the next miss.
+        """
         target = self.resolve(path)
         if not target.is_file():
             raise WorkspaceError(f"{path} does not exist or is not a file.")
@@ -96,6 +119,8 @@ class Workspace:
             raise WorkspaceError(f"{path} is not UTF-8 text.") from exc
 
         self.seen.add(target)
+        if not partial:
+            self.written_since_read.discard(target)
         return content
 
     def require_seen(self, target: Path, path: str) -> None:
@@ -113,6 +138,13 @@ class Workspace:
         target.write_text(content, encoding="utf-8")
         # A file the agent just wrote counts as seen: it knows the contents.
         self.seen.add(target)
+        self.written.add(target)
+        # Knowing them and being able to reproduce them verbatim are different
+        # things, though. After a write the model has only a confirmation, not
+        # the new text, and an anchor recalled from before the write is the
+        # most common way an edit comes to match nothing at all. Recorded so
+        # the failure can say so instead of leaving it to be guessed at.
+        self.written_since_read.add(target)
         return target
 
     # --- walking ----------------------------------------------------------
@@ -146,6 +178,22 @@ class Workspace:
     def is_dirty(self) -> bool:
         result = self._git("status", "--porcelain")
         return bool(result.stdout.strip())
+
+    def _dirty_paths(self) -> frozenset[str]:
+        """Workspace-relative paths with uncommitted changes, right now."""
+        if not self.is_git_repo:
+            return frozenset()
+        found: set[str] = set()
+        for line in self._git("status", "--porcelain").stdout.splitlines():
+            # Porcelain v1: two status characters, a space, then the path. A
+            # rename reads "old -> new"; the new name is the one on disk.
+            name = line[3:].strip()
+            if " -> " in name:
+                name = name.rpartition(" -> ")[2]
+            name = name.strip().strip('"')
+            if name:
+                found.add(name)
+        return frozenset(found)
 
     def head(self) -> str | None:
         """The current commit, recorded with a session so a resume can tell

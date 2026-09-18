@@ -34,6 +34,9 @@ _MAX_OUTPUT = 4_000
 #: does not take the turn down with it.
 _TIMEOUT = 30.0
 
+#: Just long enough to ask a tool its version.
+_PROBE_TIMEOUT = 10.0
+
 
 @dataclass(frozen=True)
 class Check:
@@ -60,6 +63,9 @@ class Checks:
 
     checks: list[Check] = field(default_factory=list)
     timeout: float = _TIMEOUT
+    #: Checkers dropped mid-session because they turned out to be broken.
+    #: Surfaced to the user, never to the model.
+    broken: list[str] = field(default_factory=list)
 
     def run(self, root: Path, path: str) -> str:
         """Problems found in ``path``, or an empty string if it looks fine."""
@@ -70,7 +76,9 @@ class Checks:
             return syntax
 
         findings: list[str] = []
-        for check in self.checks:
+        # Over a copy: a checker found to be broken is removed from the list as
+        # we go, and mutating it here would skip whichever came next.
+        for check in list(self.checks):
             if not check.applies_to(path):
                 continue
             finding = self._run_one(check, root, path)
@@ -99,7 +107,27 @@ class Checks:
         # A non-zero exit with nothing to say is a checker that does not
         # understand the file, not a problem with the file.
         output = (result.stdout + result.stderr).strip()
-        return _truncate(output) if output else ""
+        if not output:
+            return ""
+
+        # A diagnostic names the file it is about. Output that never mentions
+        # it is the checker itself failing - a pyenv shim for a version that
+        # does not have the tool installed, most memorably, which says
+        # "ruff: command not found" and exits 1. Reported as a finding, that
+        # tells the model to fix a problem the file does not have, and it will
+        # dutifully rewrite the file over and over trying.
+        if Path(path).name not in output:
+            self._disable(check, output)
+            return ""
+
+        return _truncate(output)
+
+    def _disable(self, check: Check, output: str) -> None:
+        """Drop a checker that cannot run, once, rather than every edit."""
+        if check in self.checks:
+            self.checks.remove(check)
+        first = output.splitlines()[0] if output else "no output"
+        self.broken.append(f"{check.command.split()[0]} could not run ({first}) - not checking")
 
 
 def _python_syntax_error(root: Path, path: str) -> str:
@@ -133,10 +161,33 @@ def detect_checks() -> list[Check]:
     check the user has to switch on is a check that stays off.
     """
     found: list[Check] = []
-    if shutil.which("ruff"):
+    if _works("ruff"):
         # --force-exclude so a path the project excludes stays excluded even
         # though it is being named explicitly.
         found.append(
             Check("ruff check --no-cache --force-exclude --output-format=concise {path}", (".py",))
         )
     return found
+
+
+def _works(program: str) -> bool:
+    """On PATH *and* able to run.
+
+    ``shutil.which`` is not enough. A pyenv shim is a real file on PATH that
+    execs whatever the active Python version has installed, and exits with
+    "command not found" when that version does not have it - which depends on
+    the directory you happen to be standing in. So the tool is actually run.
+    """
+    if shutil.which(program) is None:
+        return False
+    try:
+        probe = subprocess.run(  # noqa: S603
+            [program, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0

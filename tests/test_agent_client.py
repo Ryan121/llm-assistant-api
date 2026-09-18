@@ -116,6 +116,36 @@ async def test_truncated_arguments_are_never_executed() -> None:
     assert any("not valid JSON" in problem for problem in turn.malformed)
 
 
+async def test_a_call_cut_off_by_the_token_cap_says_so() -> None:
+    """Truncation and malformed JSON need opposite corrections.
+
+    A call that ran out of output budget failed because it was too big, and
+    the model can act on that. Reported only as "arguments were not valid
+    JSON", it reads as a formatting slip: in a real session a whole-file
+    write_file of a 108 kB template was cut off, reported that way, and the
+    model wandered off rather than making a smaller edit.
+    """
+    transport = _stream(
+        _sse(
+            [
+                _tool_delta(call_id="call_1", name="write_file"),
+                _tool_delta(arguments='{"path": "a.html", "content": "<html'),
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]},
+            ]
+        )
+    )
+
+    turn, raw, _ = await _run(transport)
+
+    assert turn.tool_calls == []
+    assert raw == []
+    problem = "; ".join(turn.malformed)
+    assert "cut off by the output token limit" in problem
+    assert "smaller pieces" in problem
+    # The JSON complaint is the wrong diagnosis here and must not be given.
+    assert "not valid JSON" not in problem
+
+
 async def test_a_call_with_no_name_is_rejected() -> None:
     transport = _stream(_sse([_tool_delta(arguments="{}")]))
 

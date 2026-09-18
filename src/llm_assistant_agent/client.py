@@ -125,11 +125,15 @@ class ChatClient:
         tools: list[dict[str, Any]],
         *,
         on_text: Callable[[str], None],
+        on_tool_delta: Callable[[], None] = lambda: None,
     ) -> tuple[AssistantTurn, list[dict[str, Any]]]:
         """Run one streamed turn.
 
         Returns the assembled turn and the raw tool-call payloads, which have
         to go back into the transcript verbatim so the ids line up.
+
+        ``on_tool_delta`` fires whenever a fragment of a tool call arrives -
+        the part of a turn that produces no output at all.
         """
         payload: dict[str, Any] = {
             "model": self.model,
@@ -174,7 +178,7 @@ class ChatClient:
                     event = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                _consume(event, turn, partials, on_text)
+                _consume(event, turn, partials, on_text, on_tool_delta)
         finally:
             await response.aclose()
 
@@ -187,6 +191,7 @@ def _consume(
     turn: AssistantTurn,
     partials: dict[int, _PartialToolCall],
     on_text: Callable[[str], None],
+    on_tool_delta: Callable[[], None] = lambda: None,
 ) -> None:
     choices = event.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -208,7 +213,14 @@ def _consume(
         turn.content += content
         on_text(content)
 
-    for fragment in delta.get("tool_calls") or []:
+    fragments = delta.get("tool_calls") or []
+    if fragments:
+        # Arguments stream one fragment at a time and print nothing, so this is
+        # where a turn goes quiet - for a whole-file write_file, for a long
+        # time. The caller uses it to show that something is still happening.
+        on_tool_delta()
+
+    for fragment in fragments:
         if not isinstance(fragment, dict):
             continue
         index = fragment.get("index", 0)
@@ -249,7 +261,21 @@ def _finalise(turn: AssistantTurn, partials: dict[int, _PartialToolCall]) -> lis
             arguments = json.loads(text)
         except json.JSONDecodeError as exc:
             # Truncated mid-argument: the usual shape of a stream that ended
-            # early or hit the token cap.
+            # early or hit the token cap. Which of the two it was matters, and
+            # the finish reason says: a call cut off by the cap fails for a
+            # reason the model can act on - it tried to emit too much - while
+            # "not valid JSON" reads as a formatting slip and invites the same
+            # oversized call again. Seen on a 108 kB template: a whole-file
+            # write_file could not fit in the output budget, was reported only
+            # as "Expecting ',' delimiter", and the edit was abandoned.
+            if turn.finish_reason == "length":
+                turn.malformed.append(
+                    f"{partial.name}: the arguments were cut off by the output token "
+                    "limit, so the call was not executed. It was too large to emit. "
+                    "Do the same work in smaller pieces - for a file, several small "
+                    "edit_file calls rather than one whole-file write_file."
+                )
+                continue
             turn.malformed.append(
                 f"{partial.name}: arguments were not valid JSON ({exc.msg}). "
                 "The call was not executed."
