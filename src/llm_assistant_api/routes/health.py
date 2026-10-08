@@ -24,17 +24,50 @@ from ..proxy import get_circuit_breaker, probe_upstream
 router = APIRouter(tags=["operations"])
 
 
-@router.post("/admin/circuit-breaker/reset", summary="Manually reset the circuit breaker")
-async def reset_circuit_breaker_endpoint() -> dict[str, str]:
-    """Reset the circuit breaker to closed state.
+@router.post("/admin/circuit-breaker/reset", summary="Manually reset the circuit breaker(s)")
+async def reset_circuit_breaker_endpoint(
+    base_url: str | None = None,
+) -> dict[str, Any]:
+    """Reset circuit breaker(s) to closed state.
 
     Use this when you've confirmed upstream is healthy and want to
     restore traffic without restarting the gateway.
+
+    Args:
+        base_url: Optional. If provided, reset only this upstream.
+                  Otherwise reset all circuit breakers.
     """
     from ..proxy import reset_circuit_breaker
 
-    reset_circuit_breaker()
-    return {"status": "circuit_breaker_reset", "state": "closed"}
+    reset_circuit_breaker(base_url)
+    if base_url:
+        return {
+            "status": "circuit_breaker_reset",
+            "base_url": base_url,
+            "state": "closed",
+        }
+    return {"status": "all_circuit_breakers_reset", "state": "closed"}
+
+
+@router.get("/admin/circuit-breakers", summary="Get status of all circuit breakers")
+async def get_circuit_breakers() -> dict[str, dict[str, Any]]:
+    """Get the status of all circuit breakers.
+
+    Returns a dict mapping upstream base URLs to their circuit breaker status.
+    """
+    from ..proxy import get_all_circuit_breakers
+
+    circuits = get_all_circuit_breakers()
+    return {
+        base_url: {
+            "state": circuit.state,
+            "failures_in_window": circuit.failure_count,
+            "failure_window": circuit._failure_window,
+            "failure_threshold": circuit._failure_threshold,
+            "open_timeout": circuit._open_timeout,
+        }
+        for base_url, circuit in circuits.items()
+    }
 
 
 def _get_rate_limiter(settings: Settings = Depends(get_settings)) -> Any:
@@ -149,11 +182,25 @@ async def readyz_detailed(
             client, settings.autocomplete_base_url
         )
 
-    # Check circuit breaker status
-    circuit = get_circuit_breaker()
-    circuit_healthy = circuit.state != "open"
-    circuit_status = circuit.state
-    circuit_failures = circuit.failure_count
+    # Check circuit breaker status for each upstream (per-upstream circuit breakers)
+    circuit_breakers: dict[str, dict[str, Any]] = {}
+    all_circuits_healthy = True
+
+    for model_id, base_url in [
+        (settings.model_id, settings.upstream_base_url),
+    ]:
+        if settings.autocomplete_enabled and model_id == settings.model_id:
+            continue
+        if settings.autocomplete_enabled:
+            circuit_breakers[settings.autocomplete_model_id] = _get_circuit_status(
+                settings.autocomplete_base_url
+            )
+            if circuit_breakers[settings.autocomplete_model_id]["state"] == "open":
+                all_circuits_healthy = False
+
+        circuit_breakers[model_id] = _get_circuit_status(base_url)
+        if circuit_breakers[model_id]["state"] == "open":
+            all_circuits_healthy = False
 
     # Check rate limiter health
     rate_limiter_healthy = True
@@ -168,7 +215,7 @@ async def readyz_detailed(
             rate_limiter_healthy = False
             rate_limiter_status = "redis_connection_lost"
 
-    ready = all(upstreams.values()) and rate_limiter_healthy and circuit_healthy
+    ready = all(upstreams.values()) and rate_limiter_healthy and all_circuits_healthy
     if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
@@ -176,9 +223,15 @@ async def readyz_detailed(
         "status": "ready" if ready else "degraded",
         "upstreams": upstreams,
         "rate_limiter": rate_limiter_status,
-        "circuit_breaker": {
-            "state": circuit_status,
-            "failures_in_window": circuit_failures,
-        },
+        "circuit_breakers": circuit_breakers,
         "shutting_down": _shutting_down,
+    }
+
+
+def _get_circuit_status(base_url: str) -> dict[str, Any]:
+    """Get circuit breaker status for a specific upstream."""
+    circuit = get_circuit_breaker(base_url)
+    return {
+        "state": circuit.state,
+        "failures_in_window": circuit.failure_count,
     }

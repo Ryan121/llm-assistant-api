@@ -137,18 +137,46 @@ class _CircuitBreaker:
         return sum(1 for t in self._failures if t > cutoff)
 
 
-# Global circuit breaker instance for upstream health
-_upstream_circuit = _CircuitBreaker()
+# Global circuit breaker registry for per-upstream health tracking
+# Keyed by base_url to track each upstream independently
+_upstream_circuits: dict[str, _CircuitBreaker] = {}
+_circuit_lock = __import__("threading").Lock()
 
 
-def get_circuit_breaker() -> _CircuitBreaker:
-    """Get the global circuit breaker instance."""
-    return _upstream_circuit
+def get_circuit_breaker(base_url: str) -> _CircuitBreaker:
+    """Get or create a circuit breaker for a specific upstream.
+
+    Args:
+        base_url: The upstream base URL to get/create a circuit breaker for
+
+    Returns:
+        The circuit breaker instance for this upstream
+    """
+    with _circuit_lock:
+        if base_url not in _upstream_circuits:
+            _upstream_circuits[base_url] = _CircuitBreaker()
+        return _upstream_circuits[base_url]
 
 
-def reset_circuit_breaker() -> None:
-    """Manually reset the global circuit breaker."""
-    _upstream_circuit.reset()
+def reset_circuit_breaker(base_url: str | None = None) -> None:
+    """Manually reset circuit breaker(s).
+
+    Args:
+        base_url: If provided, reset only this upstream. Otherwise reset all.
+    """
+    with _circuit_lock:
+        if base_url:
+            if base_url in _upstream_circuits:
+                _upstream_circuits[base_url].reset()
+        else:
+            for circuit in _upstream_circuits.values():
+                circuit.reset()
+
+
+def get_all_circuit_breakers() -> dict[str, _CircuitBreaker]:
+    """Get all circuit breakers. Useful for health endpoints."""
+    with _circuit_lock:
+        return dict(_upstream_circuits)
 
 
 async def _retry_with_backoff(
@@ -422,10 +450,11 @@ async def _forward_json(
     target: Target,
     request_id: str | None = None,
 ) -> Response:
-    # Check circuit breaker before attempting request
-    can_proceed, reason = _upstream_circuit.can_proceed()
+    # Check circuit breaker before attempting request (per-upstream)
+    circuit = get_circuit_breaker(target.base_url)
+    can_proceed, reason = circuit.can_proceed()
     if not can_proceed:
-        log.warning("Request rejected: %s", reason)
+        log.warning("Request rejected for %s: %s", target.base_url, reason)
         raise UpstreamError(
             f"Upstream service temporarily unavailable: {reason}", status_code=503
         )
@@ -445,16 +474,16 @@ async def _forward_json(
 
         # Record success/failure for circuit breaker
         if upstream.status_code < 500:
-            _upstream_circuit.record_success()
+            circuit.record_success()
         else:
-            _upstream_circuit.record_failure()
+            circuit.record_failure()
 
     except httpx.TimeoutException as exc:
-        _upstream_circuit.record_failure()
+        circuit.record_failure()
         log.error("Upstream timeout when connecting to %s: %s", target.base_url, exc)
         raise UpstreamError(f"Upstream timed out: {exc}", status_code=504) from exc
     except httpx.HTTPError as exc:
-        _upstream_circuit.record_failure()
+        circuit.record_failure()
         log.error("Cannot reach model server at %s: %s", target.base_url, exc)
         raise UpstreamError(f"Cannot reach model server at {target.base_url}: {exc}") from exc
 
@@ -478,10 +507,11 @@ async def _forward_stream(
     would already be committed by the time an upstream 4xx arrived, and the
     editor would see an empty 200.
     """
-    # Check circuit breaker before attempting request
-    can_proceed, reason = _upstream_circuit.can_proceed()
+    # Check circuit breaker before attempting request (per-upstream)
+    circuit = get_circuit_breaker(target.base_url)
+    can_proceed, reason = circuit.can_proceed()
     if not can_proceed:
-        log.warning("Streaming request rejected: %s", reason)
+        log.warning("Streaming request rejected for %s: %s", target.base_url, reason)
         raise UpstreamError(
             f"Upstream service temporarily unavailable: {reason}", status_code=503
         )
@@ -504,16 +534,16 @@ async def _forward_stream(
 
         # Record success/failure for circuit breaker
         if upstream.status_code < 500:
-            _upstream_circuit.record_success()
+            circuit.record_success()
         else:
-            _upstream_circuit.record_failure()
+            circuit.record_failure()
 
     except httpx.TimeoutException as exc:
-        _upstream_circuit.record_failure()
+        circuit.record_failure()
         log.error("Upstream timeout during streaming to %s: %s", target.base_url, exc)
         raise UpstreamError(f"Upstream timed out: {exc}", status_code=504) from exc
     except httpx.HTTPError as exc:
-        _upstream_circuit.record_failure()
+        circuit.record_failure()
         log.error("Cannot reach model server at %s during streaming: %s", target.base_url, exc)
         raise UpstreamError(f"Cannot reach model server at {target.base_url}: {exc}") from exc
 

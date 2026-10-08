@@ -1,0 +1,42 @@
+# Docker Compose override for nginx TLS termination
+# Usage: docker compose --profile nginx up -d
+
+services:
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: llm-assistant-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # nginx configuration
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      # SSL certificates (update paths for production)
+      - ./ssl:/etc/nginx/ssl:ro
+      # Let's Encrypt certificates
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+    networks:
+      - llm-assistant-net
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "com.llm-assistant.description=TLS termination proxy"
+
+# Note: The gateway service should be updated to not expose ports directly
+# Remove or comment out the ports section for gateway in docker-compose.yml
+# when using nginx in production:
+#
+# gateway:
+#   # ports:
+#   #   - "${API_PORT:-8081}:8081"  # Comment this out
+#   expose:
+#     - "8081"  # Internal only
