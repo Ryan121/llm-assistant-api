@@ -1,0 +1,124 @@
+{
+  "name": "llm-assistant",
+  "displayName": "LLM Assistant Agent",
+  "description": "Agentic coding assistant powered by your self-hosted LLM gateway",
+  "version": "0.1.0",
+  "publisher": "llm-assistant",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "activationEvents": [
+    "onView:llm-assistant.chat"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "llm-assistant-container",
+          "title": "LLM Assistant",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "llm-assistant-container": [
+        {
+          "type": "webview",
+          "id": "llm-assistant.chat",
+          "name": "Chat",
+          "icon": "$(comment-discussion)",
+          "contextualTitle": "LLM Assistant"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "llm-assistant.newChat",
+        "title": "New Chat Session",
+        "icon": "$(add)",
+        "category": "LLM Assistant"
+      },
+      {
+        "command": "llm-assistant.configure",
+        "title": "Configure Gateway Connection",
+        "category": "LLM Assistant"
+      },
+      {
+        "command": "llm-assistant.showSessions",
+        "title": "Show Saved Sessions",
+        "category": "LLM Assistant"
+      }
+    ],
+    "configuration": {
+      "title": "LLM Assistant",
+      "properties": {
+        "llm-assistant.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8081/v1",
+          "description": "Base URL of the LLM gateway (OpenAI-compatible API)"
+        },
+        "llm-assistant.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for authentication"
+        },
+        "llm-assistant.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model ID to use (leave empty to auto-detect from gateway)"
+        },
+        "llm-assistant.contextWindow": {
+          "type": "number",
+          "default": 131072,
+          "description": "Maximum context window size in tokens"
+        },
+        "llm-assistant.autoApproveEdits": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve file edits without showing diff"
+        },
+        "llm-assistant.autoApproveCommands": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically approve shell commands"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts,tsx",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js",
+    "unit-test": "jest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@types/jest": "^29.5.11",
+    "@types/mocha": "^10.0.6",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "@vscode/test-electron": "^2.3.8",
+    "eslint": "^8.54.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "eventsource-parser": "^1.1.1",
+    "csv-parse": "^5.5.2",
+    "xlsx": "^0.18.5",
+    "pdf-parse": "^1.1.1"
+  },
+  "optionalDependencies": {
+    "pdfjs-dist": "^4.0.379"
+  }
+}
