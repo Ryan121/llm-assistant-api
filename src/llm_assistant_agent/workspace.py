@@ -18,7 +18,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["Workspace", "WorkspaceError"]
+__all__ = ["Workspace", "WorkspaceError", "MultiWorkspace"]
 
 #: Never walked when listing or searching. Anything here is either enormous,
 #: generated, or secret.
@@ -245,4 +245,79 @@ class Workspace:
         return [
             self._git("diff", "--no-index", "--", "/dev/null", name).stdout.strip()
             for name in names
+        ]
+
+
+@dataclass
+class MultiWorkspace:
+    """Manages multiple workspaces (e.g., git worktrees) in one session.
+
+    Allows the agent to work across related repositories simultaneously.
+    Each workspace is independent - files must be read in their respective
+    workspace before editing.
+
+    Example::
+
+        multi = MultiWorkspace([
+            Workspace.open(Path("/repo-main")),
+            Workspace.open(Path("/repo-frontend")),
+        ])
+
+        # Switch active workspace
+        multi.set_active(0)
+        multi.active.read("src/main.py")
+
+        # Or access by name
+        multi["frontend"].read("package.json")
+    """
+
+    workspaces: list[Workspace]
+    names: list[str] = field(default_factory=list)
+    _active_index: int = 0
+
+    @classmethod
+    def open(cls, roots: list[Path], names: list[str] | None = None) -> MultiWorkspace:
+        """Create a multi-workspace from multiple roots."""
+        workspaces = [Workspace.open(root) for root in roots]
+        if names is None:
+            names = [root.name for root in roots]
+        return cls(workspaces=workspaces, names=names)
+
+    @property
+    def active(self) -> Workspace:
+        """The currently active workspace."""
+        return self.workspaces[self._active_index]
+
+    @property
+    def active_name(self) -> str:
+        """Name of the active workspace."""
+        return self.names[self._active_index] if self.names else str(self._active_index)
+
+    def set_active(self, index: int | str) -> None:
+        """Switch the active workspace by index or name."""
+        if isinstance(index, str):
+            try:
+                index = self.names.index(index)
+            except ValueError as exc:
+                raise ValueError(f"Unknown workspace: {index!r}") from exc
+        if not 0 <= index < len(self.workspaces):
+            raise IndexError(f"Workspace index {index} out of range")
+        self._active_index = index
+
+    def __getitem__(self, key: int | str) -> Workspace:
+        """Get a workspace by index or name."""
+        if isinstance(key, str):
+            try:
+                key = self.names.index(key)
+            except ValueError as exc:
+                raise KeyError(f"Unknown workspace: {key!r}") from exc
+        return self.workspaces[key]
+
+    def __len__(self) -> int:
+        return len(self.workspaces)
+
+    def list_workspaces(self) -> list[tuple[str, Path]]:
+        """List all workspaces as (name, root) pairs."""
+        return [
+            (name, ws.root) for name, ws in zip(self.names, self.workspaces, strict=False)
         ]

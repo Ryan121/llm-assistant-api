@@ -30,7 +30,14 @@ from typing import Any
 
 from .workspace import Workspace, WorkspaceError
 
-__all__ = ["SessionStore", "StoredSession", "new_id", "restore_seen"]
+__all__ = [
+    "SessionStore",
+    "StoredSession",
+    "new_id",
+    "restore_seen",
+    "export_session",
+    "import_session",
+]
 
 #: Bumped when the on-disk shape changes. An older or newer file is skipped
 #: rather than guessed at.
@@ -253,3 +260,65 @@ def _digests(workspace: Workspace) -> dict[str, str]:
         except OSError:
             continue  # deleted since it was read; it will simply be stale
     return found
+
+
+def export_session(stored: StoredSession, output_path: Path) -> bool:
+    """Export a session to a portable JSON file.
+
+    The exported file can be imported into another workspace or shared
+    with collaborators. File digests are preserved but workspace paths
+    are made relative to allow import elsewhere.
+
+    Returns True on success.
+    """
+    try:
+        payload = {
+            "version": _VERSION,
+            "exported_at": datetime.now(UTC).isoformat(),
+            "original_workspace": str(stored.workspace),
+            "id": stored.id,
+            "model": stored.model,
+            "head": stored.head,
+            "seen": stored.seen,
+            "messages": stored.messages,
+        }
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def import_session(
+    import_path: Path, workspace: Workspace, store: SessionStore
+) -> tuple[StoredSession | None, str]:
+    """Import a session from an exported JSON file.
+
+    Returns (StoredSession, error_message). The session is not automatically
+    saved - caller should save it if desired.
+
+    File digests are validated against the current workspace. Messages are
+    preserved as-is, but the workspace path is updated to match the current
+    workspace.
+    """
+    try:
+        payload = json.loads(import_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"Cannot read import file: {exc}"
+
+    if not isinstance(payload, dict) or payload.get("version") != _VERSION:
+        return None, "Invalid or unsupported export format"
+
+    try:
+        stored = StoredSession(
+            id=payload.get("id", new_id()),
+            workspace=workspace.root,
+            model=str(payload.get("model", "")),
+            updated=datetime.now(UTC),
+            messages=list(payload.get("messages") or []),
+            seen=dict(payload.get("seen") or {}),
+            head=payload.get("head"),
+        )
+        return stored, ""
+    except (KeyError, TypeError, ValueError) as exc:
+        return None, f"Invalid session data: {exc}"

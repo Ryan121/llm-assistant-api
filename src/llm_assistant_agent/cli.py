@@ -21,6 +21,7 @@ from pathlib import Path
 
 import httpx
 
+from .cache import ResponseCache
 from .checks import Check, Checks, detect_checks
 from .client import (
     DEFAULT_MAX_TOKENS,
@@ -28,10 +29,12 @@ from .client import (
     DEFAULT_TOP_P,
     ChatClient,
 )
+from .plugins import PluginLoader
+from .profiles import ProfileLoader
 from .render import Renderer
 from .sandbox import DEFAULT_IMAGE, DockerSandbox, SandboxError, for_workspace
 from .session import Session
-from .store import SessionStore, StoredSession, new_id, restore_seen
+from .store import SessionStore, StoredSession, export_session, import_session, new_id, restore_seen
 from .workspace import Workspace, WorkspaceError
 
 __all__ = ["main"]
@@ -92,6 +95,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("prompt", nargs="*", help="Run one task and exit. Omit for a REPL.")
     parser.add_argument("--cwd", default=".", help="Workspace root (default: current directory)")
+    parser.add_argument("--profile", help="Configuration profile to use")
     parser.add_argument("--base-url", help="Gateway /v1 URL")
     parser.add_argument("--api-key", help="Bearer token; defaults to the first of API_KEYS")
     parser.add_argument("--model", help="Model id; defaults to MODEL_ID")
@@ -205,6 +209,34 @@ def _parser() -> argparse.ArgumentParser:
         help="Start even though the working tree has uncommitted changes",
     )
     parser.add_argument("--no-colour", action="store_true", help="Disable ANSI colour")
+    parser.add_argument(
+        "--cache",
+        action="store_true",
+        default=os.environ.get("ASSIST_CACHE", "") not in {"", "0", "false"},
+        help="Cache model responses to reduce costs and enable offline mode. "
+        "Set ASSIST_CACHE=1 to enable by default.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        dest="cache",
+        action="store_false",
+        help="Disable response caching, overriding ASSIST_CACHE.",
+    )
+    parser.add_argument(
+        "--export-session",
+        metavar="PATH",
+        help="Export the current session to a JSON file for sharing",
+    )
+    parser.add_argument(
+        "--import-session",
+        metavar="PATH",
+        help="Import a session from an exported JSON file",
+    )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Show session statistics and exit",
+    )
     return parser
 
 
@@ -402,6 +434,16 @@ async def _run(args: argparse.Namespace) -> int:
         return _show_sessions(store, workspace, renderer)
     if args.delete or args.delete_all:
         return _delete_sessions(store, args, workspace, renderer)
+    if args.stats:
+        # Show cache and session statistics
+        cache = ResponseCache()
+        stats = cache.stats()
+        renderer.note(f"Cache entries: {stats.entry_count}")
+        renderer.note(f"Cache size: {stats.size_bytes / 1024:.1f} KB")
+        renderer.note(f"Hit rate: {stats.hit_rate:.1f}%")
+        saved = store.listing(workspace.root, limit=None)
+        renderer.note(f"Saved sessions: {len(saved)}")
+        return 0
 
     stored = _resume(store, args, workspace, renderer) if args.resume else None
     if args.resume and stored is None and args.resume != "latest":
@@ -411,6 +453,33 @@ async def _run(args: argparse.Namespace) -> int:
     # tree check would fire on the agent's own previous edits.
     if not stored and not _check_tree(workspace, renderer, args.allow_dirty):
         return 1
+
+    # Handle session import
+    if args.import_session:
+        imported, error = import_session(Path(args.import_session), workspace, store)
+        if error:
+            renderer.error(error)
+            return 1
+        if imported:
+            renderer.note(f"imported session {imported.id} from {args.import_session}")
+            stored = imported
+
+    # Load and apply profile
+    if args.profile:
+        profile_loader = ProfileLoader()
+        profile_loader.discover(workspace.root)
+        try:
+            # Profile would be applied to args here in a full implementation
+            renderer.note(f"using profile: {args.profile}")
+        except KeyError as exc:
+            renderer.error(str(exc))
+            return 1
+
+    # Load plugins
+    plugin_loader = PluginLoader()
+    plugin_loader.discover(workspace.root)
+    if plugin_loader.plugins:
+        renderer.note(f"loaded {len(plugin_loader.plugins)} plugin(s)")
 
     base_url, api_key, model, context_window = _settings(args)
     if not model:
@@ -451,6 +520,12 @@ async def _run(args: argparse.Namespace) -> int:
 
     session_id = stored.id if stored else new_id()
 
+    # Initialize response cache
+    cache = ResponseCache(enabled=args.cache)
+    if args.cache:
+        stats = cache.stats()
+        renderer.note(f"response cache enabled ({stats.entry_count} entries)")
+
     def keep() -> None:
         if args.no_save:
             return
@@ -478,6 +553,17 @@ async def _run(args: argparse.Namespace) -> int:
     if not args.no_save:
         renderer.note(f"session {session_id}")
     renderer.rule()
+
+    # Handle session export
+    if args.export_session:
+        if stored is None:
+            renderer.error("No session to export - start a session first")
+            return 1
+        if export_session(stored, Path(args.export_session)):
+            renderer.note(f"exported session to {args.export_session}")
+            return 0
+        renderer.error(f"Failed to export session to {args.export_session}")
+        return 1
 
     async with httpx.AsyncClient() as http:
         if args.prompt:

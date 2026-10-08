@@ -39,6 +39,11 @@ documents = [
   "pdfplumber>=0.11,<1.0",
   "openpyxl>=3.1,<4.0",
 ]
+# Adds configuration profiles (YAML), plugin system, and response caching.
+# These are architecture-level improvements for extensibility.
+advanced = [
+  "pyyaml>=6.0,<7.0",
+]
 
 [project.scripts]
 assist = "llm_assistant_agent.cli:main"
