@@ -8,8 +8,12 @@ the environment, which is hostile in a ``.env`` file.
 
 from __future__ import annotations
 
-from pydantic import field_validator
+import logging
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger(__name__)
 
 
 def _split_csv(raw: str) -> tuple[str, ...]:
@@ -190,3 +194,23 @@ class Settings(BaseSettings):
         if v <= 0:
             raise ValueError("chars_per_token must be positive")
         return v
+
+    @model_validator(mode="after")
+    def validate_timeouts_consistency(self) -> Settings:
+        """Ensure route-specific timeouts don't exceed the global timeout."""
+        if self.autocomplete_timeout_seconds > self.request_timeout_seconds:
+            log.warning(
+                "autocomplete_timeout_seconds (%.1f) exceeds request_timeout_seconds (%.1f); "
+                "capping to global timeout",
+                self.autocomplete_timeout_seconds,
+                self.request_timeout_seconds,
+            )
+            # Don't modify, just warn - the global timeout will still apply
+        if self.embeddings_timeout_seconds > self.request_timeout_seconds:
+            log.warning(
+                "embeddings_timeout_seconds (%.1f) exceeds request_timeout_seconds (%.1f); "
+                "capping to global timeout",
+                self.embeddings_timeout_seconds,
+                self.request_timeout_seconds,
+            )
+        return self

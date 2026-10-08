@@ -59,6 +59,7 @@ def require_api_key(
     identifier = _get_client_identifier(credentials, settings, request)
     if not rate_limiter.is_allowed(identifier):
         reset_time = rate_limiter.get_reset_time(identifier)
+        reset_seconds = max(1, int(reset_time - time.time()))
         log.warning(
             "rate limited request from %s: exceeded limit of %d requests per %d seconds",
             identifier,
@@ -68,14 +69,15 @@ def require_api_key(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=error_body(
-                "Too many requests. Please slow down.",
+                f"Rate limit exceeded. Please retry after {reset_seconds} seconds.",
                 "rate_limit_exceeded",
                 "rate_limit_exceeded",
             ),
             headers={
-                "Retry-After": str(int(reset_time - time.time())),
+                "Retry-After": str(reset_seconds),
                 "X-RateLimit-Limit": str(rate_limiter.config.max_requests),
-                "X-RateLimit-Remaining": str(rate_limiter.get_remaining_requests(identifier)),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(int(reset_time)),
             },
         )
 

@@ -45,6 +45,9 @@ Copilot BYOK) at `/v1` and authenticate with a bearer token from `API_KEYS`.
 
 
 def _build_client(settings: Settings) -> httpx.AsyncClient:
+    # Keepalive connections slightly fewer than max to allow proper lifecycle management.
+    # This prevents holding onto stale connections while still maintaining a warm pool.
+    keepalive = max(10, int(settings.max_connections * 0.8))
     return httpx.AsyncClient(
         timeout=httpx.Timeout(
             settings.request_timeout_seconds,
@@ -52,7 +55,7 @@ def _build_client(settings: Settings) -> httpx.AsyncClient:
         ),
         limits=httpx.Limits(
             max_connections=settings.max_connections,
-            max_keepalive_connections=settings.max_connections,
+            max_keepalive_connections=keepalive,
         ),
         follow_redirects=False,
     )

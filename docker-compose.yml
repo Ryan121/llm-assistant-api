@@ -125,6 +125,7 @@ services:
     build:
       context: .
       target: runtime
+      network: host
       args:
         APP_VERSION: ${API_IMAGE_TAG:-local}
         GIT_SHA: ${GIT_SHA:-unknown}

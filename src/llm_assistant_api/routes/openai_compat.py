@@ -81,15 +81,18 @@ async def _handle(
         # and reading the body there would consume the request stream.
         metrics_collector.record_model_usage(target.model_id)
 
+        request_id = getattr(request.state, "request_id", None)
         log.info(
             "forward %s model=%s->%s stream=%s rid=%s",
             path,
             requested_model,
             target.model_id,
             streaming,
-            getattr(request.state, "request_id", "-"),
+            request_id or "-",
         )
-        return await forward(client, path, prepared, target, stream=streaming)
+        return await forward(
+            client, path, prepared, target, stream=streaming, request_id=request_id
+        )
     except (HTTPException, UpstreamError, ModelNotFoundError, ContextOverflowError):
         # These already carry the right status code and are rendered by the
         # dedicated handlers in main.py. Collapsing them into a 500 below would

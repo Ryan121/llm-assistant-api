@@ -68,10 +68,12 @@ class Target:
     def url(self, path: str) -> str:
         return f"{self.base_url}/{path.lstrip('/')}"
 
-    def headers(self) -> dict[str, str]:
+    def headers(self, request_id: str | None = None) -> dict[str, str]:
         headers = {"content-type": "application/json"}
         if self.api_key:
             headers["authorization"] = f"Bearer {self.api_key}"
+        if request_id:
+            headers["x-request-id"] = request_id
         return headers
 
 
@@ -213,23 +215,28 @@ async def forward(
     target: Target,
     *,
     stream: bool,
+    request_id: str | None = None,
 ) -> Response:
     """Send ``payload`` to ``target`` and adapt the reply for our caller."""
     log.debug("Forwarding request to %s:%s with stream=%s", target.base_url, path, stream)
     if stream:
-        return await _forward_stream(client, path, payload, target)
-    return await _forward_json(client, path, payload, target)
+        return await _forward_stream(client, path, payload, target, request_id)
+    return await _forward_json(client, path, payload, target, request_id)
 
 
 async def _forward_json(
-    client: httpx.AsyncClient, path: str, payload: dict[str, Any], target: Target
+    client: httpx.AsyncClient,
+    path: str,
+    payload: dict[str, Any],
+    target: Target,
+    request_id: str | None = None,
 ) -> Response:
     try:
         log.debug("Making JSON request to %s", target.url(path))
         upstream = await client.post(
             target.url(path),
             json=payload,
-            headers=target.headers(),
+            headers=target.headers(request_id),
             **_timeout_kwarg(target),
         )
         log.debug("Received JSON response with status %d", upstream.status_code)
@@ -248,7 +255,11 @@ async def _forward_json(
 
 
 async def _forward_stream(
-    client: httpx.AsyncClient, path: str, payload: dict[str, Any], target: Target
+    client: httpx.AsyncClient,
+    path: str,
+    payload: dict[str, Any],
+    target: Target,
+    request_id: str | None = None,
 ) -> Response:
     """Open the upstream stream eagerly so errors become normal JSON replies.
 
@@ -261,7 +272,7 @@ async def _forward_stream(
         "POST",
         target.url(path),
         json=payload,
-        headers=target.headers(),
+        headers=target.headers(request_id),
         **_timeout_kwarg(target),
     )
     try:

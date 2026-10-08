@@ -244,6 +244,7 @@ SANDBOX_PYTHON ?= 3.13
 .PHONY: sandbox-image
 sandbox-image: ## Build the agent's `run` container (SANDBOX_PYTHON=3.11 to match a project)
 	@docker build -f docker/sandbox.Dockerfile \
+	  --network host \
 	  --build-arg PYTHON_VERSION=$(SANDBOX_PYTHON) \
 	  -t $(SANDBOX_IMAGE) .
 

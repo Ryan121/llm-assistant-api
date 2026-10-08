@@ -34,12 +34,15 @@ async def embeddings(
 ) -> Response:
     target = resolve_embeddings_target(settings)
     prepared = {**payload, "model": target.model_id}
+    request_id = getattr(request.state, "request_id", None)
     log.info(
         "forward embeddings model=%s rid=%s",
         target.model_id,
-        getattr(request.state, "request_id", "-"),
+        request_id or "-",
     )
-    return await forward(client, "embeddings", prepared, target, stream=False)
+    return await forward(
+        client, "embeddings", prepared, target, stream=False, request_id=request_id
+    )
 
 
 @router.post("/rerank", summary="Rerank candidate documents against a query")
@@ -51,9 +54,10 @@ async def rerank(
 ) -> Response:
     target = resolve_rerank_target(settings)
     prepared = {**payload, "model": target.model_id}
+    request_id = getattr(request.state, "request_id", None)
     log.info(
         "forward rerank model=%s rid=%s",
         target.model_id,
-        getattr(request.state, "request_id", "-"),
+        request_id or "-",
     )
-    return await forward(client, "rerank", prepared, target, stream=False)
+    return await forward(client, "rerank", prepared, target, stream=False, request_id=request_id)
