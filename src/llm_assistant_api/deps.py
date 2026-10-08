@@ -13,7 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings
 from .errors import error_body
-from .rate_limiting import rate_limiter
+from .rate_limiting import RateLimiter
 
 log = logging.getLogger(__name__)
 
@@ -37,10 +37,17 @@ def get_http_client(request: Request) -> httpx.AsyncClient:
     return client
 
 
+def _get_rate_limiter(request: Request) -> RateLimiter:
+    """Get rate limiter from app state."""
+    limiter: RateLimiter = request.app.state.rate_limiter
+    return limiter
+
+
 def require_api_key(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     settings: Settings = Depends(get_settings),
+    rate_limiter: RateLimiter = Depends(_get_rate_limiter),
 ) -> None:
     """Validate the bearer token.
 
@@ -57,14 +64,16 @@ def require_api_key(
     # Rate limiting check
     # Using IP address for rate limiting if available, otherwise token
     identifier = _get_client_identifier(credentials, settings, request)
-    if not rate_limiter.is_allowed(identifier):
-        reset_time = rate_limiter.get_reset_time(identifier)
+    endpoint = request.url.path
+    if not rate_limiter.is_allowed(identifier, endpoint):
+        reset_time = rate_limiter.get_reset_time(identifier, endpoint)
         reset_seconds = max(1, int(reset_time - time.time()))
+        config = rate_limiter._get_config_for_endpoint(endpoint)
         log.warning(
             "rate limited request from %s: exceeded limit of %d requests per %d seconds",
             identifier,
-            rate_limiter.config.max_requests,
-            rate_limiter.config.window_seconds,
+            config[0],
+            config[1],
         )
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -75,7 +84,7 @@ def require_api_key(
             ),
             headers={
                 "Retry-After": str(reset_seconds),
-                "X-RateLimit-Limit": str(rate_limiter.config.max_requests),
+                "X-RateLimit-Limit": str(config[0]),
                 "X-RateLimit-Remaining": "0",
                 "X-RateLimit-Reset": str(int(reset_time)),
             },

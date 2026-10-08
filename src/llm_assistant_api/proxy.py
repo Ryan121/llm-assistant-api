@@ -8,7 +8,9 @@ without a gateway release.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -22,6 +24,195 @@ from .errors import ModelNotFoundError, RouteDisabledError, UpstreamError
 from .payload import normalize_inbound_payload
 
 log = logging.getLogger(__name__)
+
+#: HTTP status codes that should trigger a retry with exponential backoff.
+_RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
+
+#: Maximum number of retry attempts for transient upstream failures.
+_MAX_RETRY_ATTEMPTS = 3
+
+#: Base delay for exponential backoff (seconds).
+_RETRY_BACKOFF_BASE = 0.5
+
+#: Maximum jitter to add to backoff delay (seconds).
+_RETRY_BACKOFF_JITTER = 0.3
+
+#: Time window for tracking failures in the circuit breaker (seconds).
+_CIRCUIT_FAILURE_WINDOW = 60.0
+
+#: Number of failures in the window to trip the circuit breaker.
+_CIRCUIT_FAILURE_THRESHOLD = 5
+
+#: Time the circuit stays open before allowing a test request (seconds).
+_CIRCUIT_OPEN_TIMEOUT = 30.0
+
+
+class _CircuitBreaker:
+    """Circuit breaker for upstream health tracking.
+
+    Tracks failuresls over a time window and opens the circuit when failures
+    exceed a threshold. When open, fails fast instead of waiting for timeouts.
+    Periodically allows test requests to check if upstream has recovered.
+    """
+
+    def __init__(
+        self,
+        failure_window: float = _CIRCUIT_FAILURE_WINDOW,
+        failure_threshold: int = _CIRCUIT_FAILURE_THRESHOLD,
+        open_timeout: float = _CIRCUIT_OPEN_TIMEOUT,
+    ) -> None:
+        self._failure_window = failure_window
+        self._failure_threshold = failure_threshold
+        self._open_timeout = open_timeout
+        self._failures: list[float] = []
+        self._state: str = "closed"  # closed, open, half-open
+        self._opened_at: float | None = None
+
+    def record_success(self) -> None:
+        """Record a successful request. Resets the circuit to closed."""
+        self._failures.clear()
+        self._state = "closed"
+        self._opened_at = None
+
+    def record_failure(self) -> None:
+        """Record a failed request. May trip the circuit to open."""
+        import time
+
+        now = time.monotonic()
+        # Remove old failures outside the window
+        cutoff = now - self._failure_window
+        self._failures = [t for t in self._failures if t > cutoff]
+        self._failures.append(now)
+
+        if len(self._failures) >= self._failure_threshold and self._state == "closed":
+            self._state = "open"
+            self._opened_at = now
+
+    def can_proceed(self) -> tuple[bool, str]:
+        """Check if a request can proceed. Returns (allowed, reason)."""
+        import time
+
+        if self._state == "closed":
+            return True, ""
+
+        if self._state == "open":
+            if self._opened_at is None:
+                return False, "circuit breaker open"
+            elapsed = time.monotonic() - self._opened_at
+            if elapsed >= self._open_timeout:
+                # Transition to half-open: allow one test request
+                self._state = "half-open"
+                return True, "circuit breaker half-open (test request)"
+            return False, f"circuit breaker open ({int(self._open_timeout - elapsed)}s remaining)"
+
+        # half-open state: allow one request
+        return True, "circuit breaker half-open"
+
+    def transition_to_open(self) -> None:
+        """Transition from half-open back to open on failure."""
+        import time
+
+        if self._state == "half-open":
+            self._state = "open"
+            self._opened_at = time.monotonic()
+
+    def reset(self) -> None:
+        """Manually reset the circuit breaker to closed state."""
+        self._failures.clear()
+        self._state = "closed"
+        self._opened_at = None
+
+    @property
+    def state(self) -> str:
+        """Current circuit state: 'closed', 'open', or 'half-open'."""
+        return self._state
+
+    @property
+    def failure_count(self) -> int:
+        """Current number of failures in the window."""
+        import time
+
+        now = time.monotonic()
+        cutoff = now - self._failure_window
+        return sum(1 for t in self._failures if t > cutoff)
+
+
+# Global circuit breaker instance for upstream health
+_upstream_circuit = _CircuitBreaker()
+
+
+def get_circuit_breaker() -> _CircuitBreaker:
+    """Get the global circuit breaker instance."""
+    return _upstream_circuit
+
+
+def reset_circuit_breaker() -> None:
+    """Manually reset the global circuit breaker."""
+    _upstream_circuit.reset()
+
+
+async def _retry_with_backoff(
+    func: Any,
+    max_attempts: int = _MAX_RETRY_ATTEMPTS,
+    backoff_base: float = _RETRY_BACKOFF_BASE,
+    backoff_jitter: float = _RETRY_BACKOFF_JITTER,
+) -> Any:
+    """Execute ``func`` with exponential backoff on retryable failures.
+
+    Retries on httpx.TimeoutException, httpx.ConnectError, and responses with
+    status codes in _RETRYABLE_STATUS_CODES. Uses exponential backoff with
+    jitter to prevent thundering herd on recovery.
+
+    Args:
+        func: Async callable to execute
+        max_attempts: Maximum number of attempts (initial + retries)
+        backoff_base: Base delay in seconds for exponential backoff
+        backoff_jitter: Maximum random jitter to add to each delay
+
+    Returns:
+        The result of func() on success
+
+    Raises:
+        The last exception encountered if all attempts fail
+    """
+    last_exception: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            result = await func()
+            # For responses, check if status code is retryable
+            if not (
+                isinstance(result, httpx.Response)
+                and result.status_code in _RETRYABLE_STATUS_CODES
+                and attempt < max_attempts - 1
+            ):
+                return result
+            delay = backoff_base * (2**attempt)
+            delay += secrets.randbelow(int(backoff_jitter * 1000)) / 1000
+            log.warning(
+                "Upstream returned %d, retrying in %.2fs (attempt %d/%d)",
+                result.status_code,
+                delay,
+                attempt + 1,
+                max_attempts,
+            )
+            await asyncio.sleep(delay)
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+            last_exception = exc
+            if attempt >= max_attempts - 1:
+                raise
+            delay = backoff_base * (2**attempt)
+            delay += secrets.randbelow(int(backoff_jitter * 1000)) / 1000
+            log.warning(
+                "Upstream connection failed: %s, retrying in %.2fs (attempt %d/%d)",
+                exc,
+                delay,
+                attempt + 1,
+                max_attempts,
+            )
+            await asyncio.sleep(delay)
+    if last_exception:
+        raise last_exception
+    raise RuntimeError("Retry loop exited unexpectedly")
 
 #: Response headers that belong to the upstream connection, not to ours.
 _HOP_BY_HOP = frozenset(
@@ -231,19 +422,39 @@ async def _forward_json(
     target: Target,
     request_id: str | None = None,
 ) -> Response:
-    try:
-        log.debug("Making JSON request to %s", target.url(path))
-        upstream = await client.post(
+    # Check circuit breaker before attempting request
+    can_proceed, reason = _upstream_circuit.can_proceed()
+    if not can_proceed:
+        log.warning("Request rejected: %s", reason)
+        raise UpstreamError(
+            f"Upstream service temporarily unavailable: {reason}", status_code=503
+        )
+
+    async def _do_request() -> httpx.Response:
+        return await client.post(
             target.url(path),
             json=payload,
             headers=target.headers(request_id),
             **_timeout_kwarg(target),
         )
+
+    try:
+        log.debug("Making JSON request to %s", target.url(path))
+        upstream = await _retry_with_backoff(_do_request)
         log.debug("Received JSON response with status %d", upstream.status_code)
+
+        # Record success/failure for circuit breaker
+        if upstream.status_code < 500:
+            _upstream_circuit.record_success()
+        else:
+            _upstream_circuit.record_failure()
+
     except httpx.TimeoutException as exc:
+        _upstream_circuit.record_failure()
         log.error("Upstream timeout when connecting to %s: %s", target.base_url, exc)
         raise UpstreamError(f"Upstream timed out: {exc}", status_code=504) from exc
     except httpx.HTTPError as exc:
+        _upstream_circuit.record_failure()
         log.error("Cannot reach model server at %s: %s", target.base_url, exc)
         raise UpstreamError(f"Cannot reach model server at {target.base_url}: {exc}") from exc
 
@@ -267,21 +478,42 @@ async def _forward_stream(
     would already be committed by the time an upstream 4xx arrived, and the
     editor would see an empty 200.
     """
+    # Check circuit breaker before attempting request
+    can_proceed, reason = _upstream_circuit.can_proceed()
+    if not can_proceed:
+        log.warning("Streaming request rejected: %s", reason)
+        raise UpstreamError(
+            f"Upstream service temporarily unavailable: {reason}", status_code=503
+        )
+
     log.debug("Opening streaming request to %s", target.url(path))
-    request = client.build_request(
-        "POST",
-        target.url(path),
-        json=payload,
-        headers=target.headers(request_id),
-        **_timeout_kwarg(target),
-    )
+
+    async def _do_request() -> httpx.Response:
+        request = client.build_request(
+            "POST",
+            target.url(path),
+            json=payload,
+            headers=target.headers(request_id),
+            **_timeout_kwarg(target),
+        )
+        return await client.send(request, stream=True)
+
     try:
-        upstream = await client.send(request, stream=True)
+        upstream = await _retry_with_backoff(_do_request)
         log.debug("Received streaming response with status %d", upstream.status_code)
+
+        # Record success/failure for circuit breaker
+        if upstream.status_code < 500:
+            _upstream_circuit.record_success()
+        else:
+            _upstream_circuit.record_failure()
+
     except httpx.TimeoutException as exc:
+        _upstream_circuit.record_failure()
         log.error("Upstream timeout during streaming to %s: %s", target.base_url, exc)
         raise UpstreamError(f"Upstream timed out: {exc}", status_code=504) from exc
     except httpx.HTTPError as exc:
+        _upstream_circuit.record_failure()
         log.error("Cannot reach model server at %s during streaming: %s", target.base_url, exc)
         raise UpstreamError(f"Cannot reach model server at {target.base_url}: {exc}") from exc
 

@@ -15,6 +15,7 @@ surface is the one the user already trusts.
 from __future__ import annotations
 
 import subprocess
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,6 +42,53 @@ _IGNORED_DIRECTORIES = frozenset(
 #: Read as text or refused. Keeps a 60 MB weights file out of the context.
 _MAX_READ_BYTES = 512_000
 
+#: Maximum number of files to cache for fast re-reads. LRU eviction keeps
+#: frequently accessed files while allowing the cache to adapt to workflow.
+_CACHE_MAX_SIZE = 50
+
+
+class _FileCache:
+    """LRU cache for recently read file contents.
+
+    Caches file content by (path, mtime) to automatically invalidate when
+    files are modified. Uses OrderedDict for O(1) get/set and LRU ordering.
+    """
+
+    def __init__(self, max_size: int = _CACHE_MAX_SIZE) -> None:
+        self._cache: OrderedDict[Path, tuple[float, str]] = OrderedDict()
+        self._max_size = max_size
+
+    def get(self, path: Path, mtime: float) -> str | None:
+        """Get cached content if path and mtime match. Moves to end (MRU)."""
+        if path not in self._cache:
+            return None
+        cached_mtime, content = self._cache[path]
+        if cached_mtime != mtime:
+            # File changed, invalidate cache entry
+            del self._cache[path]
+            return None
+        # Move to end (most recently used)
+        self._cache.move_to_end(path)
+        return content
+
+    def put(self, path: Path, mtime: float, content: str) -> None:
+        """Cache content for path. Evicts LRU entries if at capacity."""
+        if path in self._cache:
+            del self._cache[path]
+        elif len(self._cache) >= self._max_size:
+            # Evict least recently used (first item)
+            self._cache.popitem(last=False)
+        self._cache[path] = (mtime, content)
+
+    def invalidate(self, path: Path) -> None:
+        """Remove path from cache (called on write)."""
+        if path in self._cache:
+            del self._cache[path]
+
+    def clear(self) -> None:
+        """Clear all cached entries."""
+        self._cache.clear()
+
 
 class WorkspaceError(Exception):
     """A request the workspace refuses. The message is shown to the model."""
@@ -66,6 +114,8 @@ class Workspace:
     #: - left there by the session before it - decided they "weren't part of my
     #: intended changes", and tried three times to git checkout the user's work.
     baseline_dirty: frozenset[str] = frozenset()
+    #: LRU cache for recently read file contents, keyed by path.
+    _file_cache: _FileCache = field(default_factory=_FileCache, init=False, repr=False)
 
     @classmethod
     def open(cls, root: Path) -> Workspace:
@@ -107,16 +157,42 @@ class Workspace:
         """
         target = self.resolve(path)
         if not target.is_file():
-            raise WorkspaceError(f"{path} does not exist or is not a file.")
-        if target.stat().st_size > _MAX_READ_BYTES:
+            if target.exists():
+                raise WorkspaceError(f"{path} exists but is not a file (it may be a directory).")
+            # Provide helpful suggestion for common cases
+            parent = target.parent
+            if parent.exists():
+                raise WorkspaceError(
+                    f"{path} does not exist. Use list_files to see available files, "
+                    f"or check the path spelling."
+                )
+            raise WorkspaceError(
+                f"{path} does not exist and its parent directory is missing. "
+                "Use list_files to see available files."
+            )
+
+        stat = target.stat()
+        if stat.st_size > _MAX_READ_BYTES:
             raise WorkspaceError(
                 f"{path} is larger than {_MAX_READ_BYTES // 1000} kB. "
                 "Use grep to find the relevant region instead of reading it whole."
             )
+
+        # Try cache first (keyed by path and mtime for automatic invalidation)
+        cached = self._file_cache.get(target, stat.st_mtime)
+        if cached is not None:
+            self.seen.add(target)
+            if not partial:
+                self.written_since_read.discard(target)
+            return cached
+
         try:
             content = target.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             raise WorkspaceError(f"{path} is not UTF-8 text.") from exc
+
+        # Cache the content for future reads
+        self._file_cache.put(target, stat.st_mtime, content)
 
         self.seen.add(target)
         if not partial:
@@ -136,6 +212,8 @@ class Workspace:
         target = self.resolve(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+        # Invalidate cache since file content changed
+        self._file_cache.invalidate(target)
         # A file the agent just wrote counts as seen: it knows the contents.
         self.seen.add(target)
         self.written.add(target)

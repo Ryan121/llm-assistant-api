@@ -658,13 +658,37 @@ class ToolBox:
         target = self.workspace.resolve(path)
         self.workspace.require_seen(target, path)
 
+        # Pre-validation: check that old_string is provided and non-empty
+        old_string = arguments.get("old_string", "")
+        if not old_string:
+            return ToolOutcome(
+                f"edit_file: old_string is required and must be non-empty. "
+                f"Read {path} first to see its current content.",
+                is_error=True,
+            )
+
         # Asked before the read, which clears it: what matters is whether the
         # model had re-read the file before proposing this anchor.
         stale = target in self.workspace.written_since_read
         before = self.workspace.read(path)
+
+        # Pre-validation: check if old_string exists in the file
+        if old_string not in before:
+            # Provide helpful suggestion
+            suggestion = "Use grep to find the current content, then re-read the file."
+            if len(old_string) > 100:
+                suggestion = (
+                    "The old_string is long - ensure it matches exactly, including "
+                    "indentation and whitespace. Consider a smaller edit."
+                )
+            return ToolOutcome(
+                f"edit_file: old_string was not found in {path}. {suggestion}",
+                is_error=True,
+            )
+
         after = apply_edit(
             before,
-            str(arguments.get("old_string", "")),
+            str(old_string),
             str(arguments.get("new_string", "")),
             replace_all=bool(arguments.get("replace_all", False)),
             written_since_read=stale,
@@ -792,9 +816,18 @@ class ToolBox:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            return ToolOutcome(f"Command timed out after {seconds}s.", is_error=True)
+            return ToolOutcome(
+                f"Command timed out after {seconds}s. "
+                f"Consider increasing timeout_seconds (max 900) or running a narrower command.",
+                is_error=True,
+            )
         except OSError as exc:
-            return ToolOutcome(f"Could not run the command: {exc}", is_error=True)
+            hint = ""
+            if "No such file" in str(exc):
+                hint = " Check that the command and all its arguments are correct."
+            elif "Permission" in str(exc):
+                hint = " The command may not be executable or accessible."
+            return ToolOutcome(f"Could not run the command: {exc}.{hint}", is_error=True)
 
         output = (result.stdout + result.stderr).strip()
         if len(output) > 20_000:

@@ -62,6 +62,14 @@ class MetricsCollector:
 
     Guarded by a lock because uvicorn may run several worker threads, and a
     ``defaultdict`` mutated from two of them at once loses counts.
+
+    Tracks:
+    - Latency percentiles (p50, p95, p99)
+    - Time-to-first-token (TTFT)
+    - Error rates by endpoint and status code
+    - Upstream latency (separate from gateway latency)
+    - Rate limit hits
+    - Active request count
     """
 
     def __init__(self) -> None:
@@ -70,7 +78,11 @@ class MetricsCollector:
         self._endpoint_counts: defaultdict[str, int] = defaultdict(int)
         self._status_code_counts: defaultdict[int, int] = defaultdict(int)
         self._model_usage: defaultdict[str, int] = defaultdict(int)
+        self._error_counts: defaultdict[str, int] = defaultdict(int)  # endpoint:error_type
+        self._rate_limit_hits: defaultdict[str, int] = defaultdict(int)
+        self._upstream_latencies: deque[float] = deque(maxlen=_HISTORY)
         self._total_requests = 0
+        self._total_errors = 0
         self._lock = threading.Lock()
 
     def start_request(
@@ -108,13 +120,34 @@ class MetricsCollector:
         with self._lock:
             self._model_usage[model] += 1
 
+    def record_error(self, endpoint: str, error_type: str) -> None:
+        """Record an error for tracking error rates."""
+        with self._lock:
+            key = f"{endpoint}:{error_type}"
+            self._error_counts[key] += 1
+            self._total_errors += 1
+
+    def record_rate_limit_hit(self, endpoint: str) -> None:
+        """Record a rate limit hit."""
+        with self._lock:
+            self._rate_limit_hits[endpoint] += 1
+
+    def record_upstream_latency(self, latency_ms: float) -> None:
+        """Record upstream latency (separate from gateway latency)."""
+        with self._lock:
+            self._upstream_latencies.append(latency_ms)
+
     def get_summary(self) -> dict[str, Any]:
         """Get a summary of collected metrics."""
         with self._lock:
             return {
                 "total_requests": self._total_requests,
+                "total_errors": self._total_errors,
+                "error_rate": self._total_errors / max(1, self._total_requests),
                 "endpoint_counts": dict(self._endpoint_counts),
                 "status_code_counts": dict(self._status_code_counts),
+                "error_counts": dict(self._error_counts),
+                "rate_limit_hits": dict(self._rate_limit_hits),
                 "model_usage": dict(self._model_usage),
                 "active_requests": len(self._active),
                 "timestamp": datetime.now(UTC).isoformat(),
@@ -128,9 +161,15 @@ class MetricsCollector:
                 m.response_time_ms for m in self._completed if m.response_time_ms is not None
             )
             ttfts = sorted(m.ttft_ms for m in self._completed if m.ttft_ms is not None)
+            upstream_lats = sorted(self._upstream_latencies)
 
         if not durations:
-            return {"average_response_time_ms": 0, "active_requests": active, "sample_size": 0}
+            return {
+                "average_response_time_ms": 0,
+                "active_requests": active,
+                "sample_size": 0,
+                "error_rate": 0.0,
+            }
 
         stats: dict[str, Any] = {
             "active_requests": active,
@@ -141,10 +180,14 @@ class MetricsCollector:
             "p50_response_time_ms": _percentile(durations, 0.50),
             "p95_response_time_ms": _percentile(durations, 0.95),
             "p99_response_time_ms": _percentile(durations, 0.99),
+            "error_rate": self._total_errors / max(1, self._total_requests),
         }
         if ttfts:
             stats["p50_ttft_ms"] = _percentile(ttfts, 0.50)
             stats["p95_ttft_ms"] = _percentile(ttfts, 0.95)
+        if upstream_lats:
+            stats["p50_upstream_latency_ms"] = _percentile(upstream_lats, 0.50)
+            stats["p95_upstream_latency_ms"] = _percentile(upstream_lats, 0.95)
         return stats
 
     def render_prometheus(self) -> str:
@@ -182,6 +225,19 @@ class MetricsCollector:
             value = stats.get(f"{quantile}_ttft_ms")
             if value is not None:
                 lines.append(f'gateway_ttft_ms{{quantile="{quantile}"}} {value:.3f}')
+
+        metric("gateway_error_rate", "gauge", "Overall error rate (errors/total requests).")
+        lines.append(f"gateway_error_rate {stats.get('error_rate', 0):.6f}")
+
+        metric("gateway_upstream_latency_ms", "gauge", "Upstream latency over retained window.")
+        for quantile in ("p50", "p95"):
+            value = stats.get(f"{quantile}_upstream_latency_ms")
+            if value is not None:
+                lines.append(f'gateway_upstream_latency_ms{{quantile="{quantile}"}} {value:.3f}')
+
+        metric("gateway_rate_limit_hits_total", "counter", "Rate limit hits by endpoint.")
+        for endpoint, count in sorted(summary["rate_limit_hits"].items()):
+            lines.append(f'gateway_rate_limit_hits_total{{endpoint="{endpoint}"}} {count}')
 
         return "\n".join(lines) + "\n"
 

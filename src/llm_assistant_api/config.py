@@ -35,7 +35,9 @@ class Settings(BaseSettings):
     # --- service ----------------------------------------------------------
     app_name: str = "llm-assistant-api"
     log_level: str = "INFO"
+    log_format: str = "text"  # "text" or "json"
     cors_origins: str = ""
+    prod_mode: bool = False  # Enable production-hardened defaults
 
     # --- primary upstream (chat / edit / agent) ---------------------------
     upstream_base_url: str = "http://vllm:8999/v1"
@@ -62,6 +64,19 @@ class Settings(BaseSettings):
 
     # --- client access ----------------------------------------------------
     api_keys: str = ""
+
+    # --- rate limiting ----------------------------------------------------
+    # Per-endpoint rate limits. Format: "endpoint:max_requests:window_seconds"
+    # Examples: "/v1/chat/completions:100:60", "/v1/autocomplete:500:60"
+    # If not set, uses global defaults from rate_limiting.py
+    rate_limit_rules: str = ""
+    # Global fallback if no per-endpoint rules match
+    rate_limit_max_requests: int = 100
+    rate_limit_window_seconds: int = 60
+    rate_limit_cleanup_interval: int = 300
+    # Redis URL for distributed rate limiting (optional)
+    # Format: "redis://host:port" or "redis://user:pass@host:port/db"
+    rate_limit_redis_url: str = ""
 
     # --- proxy behaviour --------------------------------------------------
     request_timeout_seconds: float = 900.0
@@ -137,6 +152,29 @@ class Settings(BaseSettings):
         if self.context_guard_tokens <= 0:
             return 0
         return int(self.context_guard_tokens * self.context_guard_margin)
+
+    @property
+    def rate_limit_rules_parsed(self) -> dict[str, tuple[int, int]]:
+        """Parse rate limit rules into a dict: endpoint -> (max_requests, window_seconds)."""
+        if not self.rate_limit_rules:
+            return {}
+        rules: dict[str, tuple[int, int]] = {}
+        for rule in _split_csv(self.rate_limit_rules):
+            parts = rule.split(":")
+            if len(parts) != 3:
+                log.warning("Invalid rate limit rule '%s', skipping", rule)
+                continue
+            endpoint, max_req, window = parts
+            try:
+                rules[endpoint] = (int(max_req), int(window))
+            except ValueError:
+                log.warning("Invalid rate limit rule '%s', skipping", rule)
+        return rules
+
+    @property
+    def is_prod(self) -> bool:
+        """Whether running in production mode."""
+        return self.prod_mode
 
     # Validation methods - using Pydantic V2 field_validator syntax
     @field_validator("request_timeout_seconds")

@@ -463,6 +463,12 @@ class Session:
 
         The system prompt sets the rules and the recent turns hold the current
         task; it is the long tail of old file reads in between that can go.
+
+        Preserves:
+        - System prompt (first message)
+        - Last 6 messages (recent context)
+        - Tool results for files that are still being edited (written_since_read)
+        - User messages that mention files currently being worked on
         """
         if self.context_window <= 0:
             return
@@ -472,9 +478,34 @@ class Session:
             return
 
         head = self.messages[:1]
-        tail = self.messages[-6:]
-        # A tool result must keep the assistant message that requested it, or
-        # the ids dangle and vLLM rejects the request.
+        tail_count = 6
+
+        # Identify files currently being edited (written but not re-read)
+        files_being_edited = {
+            self.workspace.relative(p) for p in self.workspace.written_since_read
+        }
+
+        # Build tail, preserving tool results for files being edited
+        tail: list[dict[str, Any]] = []
+        for msg in reversed(self.messages[-tail_count:]):
+            # Keep tool results for files being edited even if they're older
+            if msg.get("role") == "tool" and files_being_edited:
+                tool_id = msg.get("tool_call_id")
+                # Check if this tool call was for a file being edited
+                for prev_msg in self.messages:
+                    if prev_msg.get("role") == "assistant":
+                        for call in prev_msg.get("tool_calls") or []:
+                            if call.get("id") == tool_id:
+                                func = call.get("function", {})
+                                if func.get("name") in {"read_file", "edit_file", "write_file"}:
+                                    file_path = func.get("arguments", {}).get("path", "")
+                                    if file_path in files_being_edited:
+                                        tail.insert(0, msg)
+                                        break
+
+            tail.insert(0, msg)
+
+        # Ensure tool results have their assistant message
         while tail and tail[0].get("role") == "tool":
             tail = tail[1:]
 
@@ -482,16 +513,36 @@ class Session:
         if dropped <= 0:
             return
 
+        # Build a summary of what was dropped, mentioning files that were read
+        dropped_files: list[str] = []
+        for msg in self.messages[1 : len(self.messages) - len(tail)]:
+            if msg.get("role") == "tool":
+                tool_id = msg.get("tool_call_id")
+                for prev_msg in self.messages:
+                    if prev_msg.get("role") == "assistant":
+                        for call in prev_msg.get("tool_calls") or []:
+                            if call.get("id") == tool_id:
+                                func = call.get("function", {})
+                                if func.get("name") == "read_file":
+                                    file_path = func.get("arguments", {}).get("path", "")
+                                    if file_path and file_path not in files_being_edited:
+                                        dropped_files.append(file_path)
+
+        summary_parts = [
+            f"[{dropped} earlier messages were dropped to stay within the context window."
+        ]
+        if dropped_files:
+            unique_files = list(dict.fromkeys(dropped_files))[:5]  # Limit to 5 files
+            summary_parts.append(f" Previously read: {', '.join(unique_files)}")
+            if len(dropped_files) > 5:
+                summary_parts.append(f" and {len(dropped_files) - 5} more.")
+            else:
+                summary_parts.append(".")
+        summary_parts.append(" Re-read any file you need rather than relying on memory.]")
+
         self.messages = [
             *head,
-            {
-                "role": "user",
-                "content": (
-                    f"[{dropped} earlier messages were dropped to stay within the "
-                    "context window. Re-read any file you need rather than relying "
-                    "on memory of it.]"
-                ),
-            },
+            {"role": "user", "content": "".join(summary_parts)},
             *tail,
         ]
         self.renderer.note(f"compacted transcript ({dropped} messages dropped)")

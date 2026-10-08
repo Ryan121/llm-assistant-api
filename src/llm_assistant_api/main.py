@@ -8,11 +8,14 @@ is created here rather than in the lifespan handler so that an app used via
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import signal
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request, Response
@@ -32,6 +35,7 @@ from .errors import (
 )
 from .logging_config import configure_logging
 from .metrics import metrics_collector
+from .rate_limiting import RateLimitConfig, init_rate_limiter
 from .routes import health, openai_compat, retrieval
 
 log = logging.getLogger(__name__)
@@ -42,6 +46,18 @@ OpenAI-compatible gateway for a locally hosted coding assistant.
 Point any OpenAI-compatible VS Code extension (Continue, Cline, Roo Code,
 Copilot BYOK) at `/v1` and authenticate with a bearer token from `API_KEYS`.
 """
+
+#: Graceful shutdown timeout in seconds. After this, in-flight requests are
+#: cancelled and the server exits.
+_SHUTDOWN_TIMEOUT = 30.0
+
+#: Maximum request body size (10MB). Prevents DoS via large payloads.
+_MAX_REQUEST_SIZE = 10 * 1024 * 1024
+
+#: Flag indicating shutdown has been requested. Used to reject new requests
+#: during the drain period.
+_shutting_down = False
+_shutdown_event: asyncio.Event | None = None
 
 
 def _build_client(settings: Settings) -> httpx.AsyncClient:
@@ -61,13 +77,117 @@ def _build_client(settings: Settings) -> httpx.AsyncClient:
     )
 
 
+def _setup_signal_handlers() -> None:
+    """Setup signal handlers for graceful shutdown."""
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
+
+    def handle_signal(signum: int, frame: Any) -> None:
+        """Handle shutdown signals."""
+        sig_name = signal.Signals(signum).name
+        log.info("Received %s, initiating graceful shutdown...", sig_name)
+        if _shutdown_event:
+            _shutdown_event.set()
+
+    # Register signal handlers
+    signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+
+
+async def _wait_for_shutdown() -> None:
+    """Wait for shutdown signal."""
+    if _shutdown_event:
+        await _shutdown_event.wait()
+
+
+def _validate_config(settings: Settings) -> None:
+    """Validate configuration and fail-fast on critical issues.
+
+    In production mode, raises exceptions for invalid configs.
+    In development mode, logs warnings.
+    """
+    errors: list[str] = []
+
+    # Validate API key entropy (if configured)
+    if settings.api_key_set:
+        for key in settings.api_key_set:
+            if len(key) < 16:
+                errors.append(
+                    f"API key is too short ({len(key)} chars). "
+                    "Use at least 16 characters for security."
+                )
+            # Check for low entropy patterns
+            if key.isnumeric() or key.isalpha() or key in {"test", "demo", "example"}:
+                errors.append(
+                    "API key appears to be weak (numeric, alphabetic, or common word). "
+                    "Use a random string."
+                )
+
+    # Validate timeout consistency
+    if settings.autocomplete_timeout_seconds > settings.request_timeout_seconds:
+        errors.append(
+            f"autocomplete_timeout_seconds ({settings.autocomplete_timeout_seconds}) "
+            f"exceeds request_timeout_seconds ({settings.request_timeout_seconds})"
+        )
+
+    if settings.embeddings_timeout_seconds > settings.request_timeout_seconds:
+        errors.append(
+            f"embeddings_timeout_seconds ({settings.embeddings_timeout_seconds}) "
+            f"exceeds request_timeout_seconds ({settings.request_timeout_seconds})"
+        )
+
+    # Validate rate limit config
+    if settings.rate_limit_max_requests <= 0:
+        errors.append("rate_limit_max_requests must be positive")
+    if settings.rate_limit_window_seconds <= 0:
+        errors.append("rate_limit_window_seconds must be positive")
+
+    # Validate context guard
+    if settings.context_guard_tokens < 0:
+        errors.append("context_guard_tokens must be non-negative")
+    if not (0.0 < settings.context_guard_margin <= 1.0):
+        errors.append("context_guard_margin must be in (0, 1]")
+
+    if errors:
+        error_msg = "Invalid production configuration:\n" + "\n".join(errors)
+        if settings.is_prod:
+            raise ValueError(error_msg)
+        for error in errors:
+            log.warning("Configuration issue: %s", error)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings()
-    configure_logging(resolved.log_level)
+
+    # Apply production defaults if prod_mode is enabled
+    if resolved.is_prod:
+        log.info("Production mode enabled - applying hardened defaults")
+        if resolved.log_format == "text":
+            resolved.log_format = "json"  # Default to JSON in prod
+
+    configure_logging(resolved.log_level, resolved.log_format)
+
+    # Validate configuration (fail-fast in prod mode)
+    _validate_config(resolved)
+
+    # Initialize rate limiter with configuration
+    redis_url = resolved.rate_limit_redis_url or None
+    rate_config = RateLimitConfig(
+        max_requests=resolved.rate_limit_max_requests,
+        window_seconds=resolved.rate_limit_window_seconds,
+        cleanup_interval=resolved.rate_limit_cleanup_interval,
+        redis_url=redis_url,
+    )
+    rate_limiter = init_rate_limiter(rate_config)
+
+    # Configure per-endpoint rate limits
+    for endpoint, (max_req, window) in resolved.rate_limit_rules_parsed.items():
+        rate_limiter.configure_endpoint(endpoint, max_req, window)
+
     client = _build_client(resolved)
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info(
             "%s v%s ready: model=%s upstream=%s",
             resolved.app_name,
@@ -79,10 +199,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.warning(
                 "API_KEYS is empty - every caller that can reach this port may use the model"
             )
+
+        # Setup graceful shutdown
+        _setup_signal_handlers()
+
         try:
             yield
         finally:
+            # Graceful shutdown: drain in-flight requests
+            log.info("Shutting down, draining in-flight requests...")
+            global _shutting_down
+            _shutting_down = True
+
+            # Wait for in-flight requests to complete (with timeout)
+            drain_start = time.perf_counter()
+            while metrics_collector.get_summary()["active_requests"] > 0:
+                elapsed = time.perf_counter() - drain_start
+                if elapsed >= _SHUTDOWN_TIMEOUT:
+                    log.warning(
+                        "Shutdown timeout reached with %d active requests, forcing close",
+                        metrics_collector.get_summary()["active_requests"],
+                    )
+                    break
+                await asyncio.sleep(0.1)
+
             await client.aclose()
+            log.info("Shutdown complete")
 
     app = FastAPI(
         title="LLM Assistant API",
@@ -92,6 +234,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved
     app.state.http = client
+    app.state.rate_limiter = rate_limiter
 
     if resolved.cors_origin_list:
         app.add_middleware(
@@ -103,9 +246,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @app.middleware("http")
+    async def request_size_limit(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """Reject requests that exceed the maximum size limit."""
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > _MAX_REQUEST_SIZE:
+            max_mb = _MAX_REQUEST_SIZE // (1024 * 1024)
+            return JSONResponse(
+                status_code=413,
+                content=error_body(
+                    f"Request body too large. Maximum size is {max_mb}MB.",
+                    "request_entity_too_large",
+                ),
+            )
+        return await call_next(request)
+
+    @app.middleware("http")
     async def access_log(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        # Reject new requests during shutdown
+        if _shutting_down:
+            return JSONResponse(
+                status_code=503,
+                content=error_body(
+                    "Server is shutting down. Please retry shortly.",
+                    "service_unavailable",
+                ),
+                headers={"Retry-After": "5"},
+            )
+
         request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
         request.state.request_id = request_id
         started = time.perf_counter()
